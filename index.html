@@ -91,6 +91,9 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .result-section-header .rs-badge { background: #404060; color: #d4d4d4; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
 .result-section-body { overflow: hidden; }
 .result-section-body.collapsed { display: none; }
+.func-name-btn { background: none; border: none; color: #569cd6; cursor: pointer; font-size: 11px; padding: 0 4px; font-family: inherit; }
+.func-name-btn:hover { text-decoration: underline; }
+.func-name { color: #dcdcaa; font-size: 10px; }
 .sr-type.read { color: #4ec9b0; }
 .sr-type.write { color: #ce9178; }
 /* 书签 */
@@ -208,7 +211,12 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <div class="result-section-header" onclick="toggleSection('secFuncList')">
         <span class="rs-arrow">▼</span><span class="rs-label">📋 函数列表</span><span class="rs-badge" id="funcBadge">0</span>
       </div>
-      <div class="result-section-body" id="funcListResults"></div>
+      <div class="result-section-body">
+        <div style="padding:4px 8px;display:flex;gap:6px;align-items:center">
+          <input type="text" id="funcSearchInput" placeholder="搜索地址/函数名..." style="width:180px;background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:3px 6px;font-size:11px;font-family:inherit;border-radius:3px">
+        </div>
+        <div id="funcListResults"></div>
+      </div>
     </div>
     <div class="result-section" id="secSearchResults" style="display:none">
       <div class="result-section-header" onclick="toggleSection('secSearchResults')">
@@ -489,12 +497,24 @@ function renderInstrRow(item, sel) {
   const marker = isCall ? '▶ ' : isRet ? '◀ ' : '';
   const bmIcon = bookmarks[item.index] ? '📌' : '';
 
+  // bl/blr 指令：从操作数提取目标地址，查函数名
+  let fnLabel = '';
+  if (isCall) {
+    const operand = instr.substring(mnemonic.length).trim();
+    // bl #0x4005bc04 → 提取地址
+    const addrMatch = operand.match(/#?(0x[0-9a-f]+)/);
+    if (addrMatch) {
+      const fname = getFuncName(addrMatch[1]);
+      if (fname) fnLabel = '<span class="func-name">(' + escHtml(fname) + ')</span>';
+    }
+  }
+
   return '<div class="instr-row' + sel + '" data-idx="' + item.index + '">'
     + '<span class="bm-icon">' + bmIcon + '</span>'
     + '<span class="idx">' + item.index + '</span>'
     + '<span class="depth-bar">' + indent + '</span>'
     + '<span class="pc">' + item.pc + '</span>'
-    + '<span class="asm' + asmClass + '">' + marker + escHtml(item.instrText) + '</span>'
+    + '<span class="asm' + asmClass + '">' + marker + escHtml(item.instrText) + fnLabel + '</span>'
     + '<span class="regs">' + escHtml(item.regText) + '</span>'
     + '</div>';
 }
@@ -1197,8 +1217,33 @@ function drawRegTraceChart() {
   ctx.fillText('0x' + minVal.toString(16), pad, h - pad);
 }
 
+// ==================== 函数命名 ====================
+const funcNames = JSON.parse(localStorage.getItem('wtv_funcnames') || '{}');
+
+function saveFuncNames() {
+  localStorage.setItem('wtv_funcnames', JSON.stringify(funcNames));
+}
+
+function getFuncName(pc) {
+  // pc 可能是 "0x4005bc04" 格式
+  return funcNames[pc] || '';
+}
+
+function renameFuncPrompt(pc) {
+  const current = funcNames[pc] || '';
+  const name = prompt('函数命名 (' + pc + '):', current);
+  if (name === null) return;
+  if (name === '') { delete funcNames[pc]; }
+  else { funcNames[pc] = name; }
+  saveFuncNames();
+  renderFuncListPage();
+  // 刷新当前指令列表
+  if (pageItems.length) renderPage();
+}
+
 // ==================== 函数列表 ====================
 let funcListData = [];
+let funcListFiltered = [];
 let funcListPage = 0;
 const FUNC_PAGE_SIZE = 50;
 
@@ -1215,41 +1260,62 @@ document.getElementById('btnFuncList').addEventListener('click', async () => {
   try {
     const data = await fetchJSON('/api/functions');
     funcListData = data.functions || [];
+    funcListFiltered = funcListData;
     funcListPage = 0;
     updateBadge('funcBadge', funcListData.length);
+    document.getElementById('funcSearchInput').value = '';
     renderFuncListPage();
   } catch(e) {
     el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">加载失败</div>';
   }
 });
 
+document.getElementById('funcSearchInput').addEventListener('input', () => {
+  const q = document.getElementById('funcSearchInput').value.trim().toLowerCase();
+  if (!q) {
+    funcListFiltered = funcListData;
+  } else {
+    funcListFiltered = funcListData.filter(f => {
+      const fname = getFuncName(f.targetPC).toLowerCase();
+      return f.targetPC.toLowerCase().includes(q) || fname.includes(q);
+    });
+  }
+  funcListPage = 0;
+  renderFuncListPage();
+});
+
 function renderFuncListPage() {
   const el = document.getElementById('funcListResults');
-  if (funcListData.length === 0) {
-    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">无函数数据</div>';
+  if (funcListFiltered.length === 0) {
+    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">无匹配函数</div>';
     return;
   }
-  const totalPages = Math.ceil(funcListData.length / FUNC_PAGE_SIZE);
+  const totalPages = Math.ceil(funcListFiltered.length / FUNC_PAGE_SIZE);
   const start = funcListPage * FUNC_PAGE_SIZE;
-  const slice = funcListData.slice(start, start + FUNC_PAGE_SIZE);
+  const slice = funcListFiltered.slice(start, start + FUNC_PAGE_SIZE);
 
   let html = '<div style="max-height:180px;overflow-y:auto">';
   for (const f of slice) {
-    html += '<div class="search-result-row" data-idx="' + f.firstCall + '" style="cursor:pointer">'
+    const fname = getFuncName(f.targetPC);
+    const nameDisplay = fname ? '<span class="func-name">' + escHtml(fname) + '</span>' : '';
+    html += '<div class="search-result-row" data-idx="' + f.firstCall + '" data-pc="' + f.targetPC + '">'
       + '<span class="sr-pc">' + f.targetPC + '</span>'
+      + nameDisplay
       + '<span class="sr-instr">调用 ' + f.callCount + ' 次</span>'
-      + '<span class="sr-idx">首次 #' + f.firstCall + '</span></div>';
+      + '<span class="sr-idx">首次 #' + f.firstCall + '</span>'
+      + '<button class="func-name-btn" onclick="event.stopPropagation();renameFuncPrompt(\'' + f.targetPC + '\')">' + (fname ? '✏️' : '命名') + '</button>'
+      + '</div>';
   }
   html += '</div>';
 
   if (totalPages > 1) {
     html += '<div class="results-pager">'
       + '<button onclick="funcListPage > 0 && (funcListPage--, renderFuncListPage())">◀</button>'
-      + '<span>' + (funcListPage + 1) + ' / ' + totalPages + ' (共 ' + funcListData.length + ' 个函数)</span>'
+      + '<span>' + (funcListPage + 1) + ' / ' + totalPages + ' (共 ' + funcListFiltered.length + ' 个函数)</span>'
       + '<button onclick="funcListPage < ' + (totalPages - 1) + ' && (funcListPage++, renderFuncListPage())">▶</button>'
       + '</div>';
   } else {
-    html += '<div style="padding:3px 8px;font-size:11px;color:#808080">共 ' + funcListData.length + ' 个函数</div>';
+    html += '<div style="padding:3px 8px;font-size:11px;color:#808080">共 ' + funcListFiltered.length + ' 个函数</div>';
   }
   el.innerHTML = html;
 }
