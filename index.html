@@ -94,6 +94,10 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .func-name-btn { background: none; border: none; color: #569cd6; cursor: pointer; font-size: 11px; padding: 0 4px; font-family: inherit; }
 .func-name-btn:hover { text-decoration: underline; }
 .func-name { color: #dcdcaa; font-size: 10px; }
+.mem-tag { font-size: 9px; padding: 0 3px; border-radius: 2px; flex-shrink: 0; font-weight: bold; }
+.mem-tag.r { color: #4ec9b0; background: #1e3a2e; }
+.mem-tag.w { color: #ce9178; background: #3a1e1e; }
+.mem-tag.rw { color: #dcdcaa; background: #3a3a1e; }
 .sr-type.read { color: #4ec9b0; }
 .sr-type.write { color: #ce9178; }
 /* 书签 */
@@ -103,14 +107,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .bookmark-bar select { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; max-width: 300px; }
 .instr-row .bm-icon { color: #e2b714; flex-shrink: 0; font-size: 10px; width: 14px; text-align: center; }
 /* Diff */
-.diff-bar { display: flex; gap: 6px; padding: 4px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; font-size: 11px; }
-.diff-bar button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
-.diff-bar button:hover { background: #505050; }
-.diff-bar span { color: #808080; }
-.hex-bytes .diff-add { background: #1e4620; color: #4ec9b0; }
-.hex-bytes .diff-del { background: #4e1e1e; color: #ce9178; }
-.hex-ascii .diff-add { background: #1e4620; color: #4ec9b0; }
-.hex-ascii .diff-del { background: #4e1e1e; color: #ce9178; }
+.diff-bar { display: none; }
 /* 寄存器追踪 */
 .reg-trace-canvas { width: 100%; height: 120px; border-bottom: 1px solid #404040; background: #1a1a2e; }
 </style>
@@ -153,13 +150,6 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   </div>
   <div class="mem-panel">
     <div class="panel-header" id="memHeader">内存访问窗口 (点击左侧指令查看)</div>
-    <div class="diff-bar">
-      <button id="btnDiffA">标记 A</button>
-      <button id="btnDiffB">标记 B</button>
-      <button id="btnDiffGo">Diff A↔B</button>
-      <button id="btnDiffClear">清除</button>
-      <span id="diffInfo"></span>
-    </div>
     <div class="mem-search">
       <input type="text" id="hlAddr" placeholder="地址 0x..." style="width:100px">
       <input type="text" id="hlSize" placeholder="size" style="width:40px" value="4">
@@ -496,6 +486,8 @@ function renderInstrRow(item, sel) {
   const indent = depth > 0 ? '│'.repeat(Math.min(depth, 20)) + ' ' : '';
   const marker = isCall ? '▶ ' : isRet ? '◀ ' : '';
   const bmIcon = bookmarks[item.index] ? '📌' : '';
+  const mf = item.memFlag || '';
+  const memTag = mf ? '<span class="mem-tag ' + mf.toLowerCase() + '">[' + mf + ']</span>' : '';
 
   // bl/blr 指令：从操作数提取目标地址，查函数名
   let fnLabel = '';
@@ -515,6 +507,7 @@ function renderInstrRow(item, sel) {
     + '<span class="depth-bar">' + indent + '</span>'
     + '<span class="pc">' + item.pc + '</span>'
     + '<span class="asm' + asmClass + '">' + marker + escHtml(item.instrText) + fnLabel + '</span>'
+    + memTag
     + '<span class="regs">' + escHtml(item.regText) + '</span>'
     + '</div>';
 }
@@ -939,109 +932,6 @@ document.getElementById('bookmarkList').addEventListener('change', async (e) => 
 });
 
 refreshBookmarkList();
-
-// ==================== 内存 Diff ====================
-let diffA = -1, diffB = -1;
-let diffRegionsA = null, diffRegionsB = null;
-
-document.getElementById('btnDiffA').addEventListener('click', () => {
-  if (selectedIdx < 0) return;
-  diffA = selectedIdx;
-  document.getElementById('diffInfo').textContent = 'A=#' + diffA + (diffB >= 0 ? ' B=#' + diffB : '');
-});
-
-document.getElementById('btnDiffB').addEventListener('click', () => {
-  if (selectedIdx < 0) return;
-  diffB = selectedIdx;
-  document.getElementById('diffInfo').textContent = (diffA >= 0 ? 'A=#' + diffA + ' ' : '') + 'B=#' + diffB;
-});
-
-document.getElementById('btnDiffClear').addEventListener('click', () => {
-  diffA = -1; diffB = -1;
-  diffRegionsA = null; diffRegionsB = null;
-  document.getElementById('diffInfo').textContent = '';
-  if (lastRegions) renderMemory(lastRegions);
-});
-
-document.getElementById('btnDiffGo').addEventListener('click', async () => {
-  if (diffA < 0 || diffB < 0) { alert('请先标记 A 和 B'); return; }
-  try {
-    const [dataA, dataB] = await Promise.all([
-      fetchJSON('/api/memory?index=' + diffA),
-      fetchJSON('/api/memory?index=' + diffB)
-    ]);
-    diffRegionsA = dataA.regions || [];
-    diffRegionsB = dataB.regions || [];
-    renderDiff();
-  } catch(e) {
-    document.getElementById('diffInfo').textContent = 'Diff 失败: ' + e.message;
-  }
-});
-
-function renderDiff() {
-  const mc = document.getElementById('memContainer');
-  if (!diffRegionsA || !diffRegionsB) return;
-
-  // 按 base 建立 B 的索引
-  const bMap = {};
-  for (const r of diffRegionsB) {
-    const key = r.base + '_' + r.type;
-    bMap[key] = r;
-  }
-
-  let html = '<div style="padding:6px;color:#569cd6;font-size:12px">Diff: A=#' + diffA + ' vs B=#' + diffB + '</div>';
-
-  for (const rA of diffRegionsA) {
-    const key = rA.base + '_' + rA.type;
-    const rB = bMap[key];
-    if (!rB) {
-      html += '<div class="mem-region"><div class="mem-region-header ' + rA.type + '">[' + (rA.type === 'write' ? 'W' : 'R') + '] ' + rA.base + ' (仅在 A)</div></div>';
-      continue;
-    }
-    html += '<div class="mem-region"><div class="mem-region-header ' + rA.type + '">[' + (rA.type === 'write' ? 'W' : 'R') + '] ' + rA.base + ' (' + rA.size + ' bytes)</div>';
-    html += '<div class="hex-dump">' + renderHexDumpDiff(rA.base, rA.hex, rB.hex) + '</div></div>';
-    delete bMap[key];
-  }
-
-  for (const key in bMap) {
-    const rB = bMap[key];
-    html += '<div class="mem-region"><div class="mem-region-header ' + rB.type + '">[' + (rB.type === 'write' ? 'W' : 'R') + '] ' + rB.base + ' (仅在 B)</div></div>';
-  }
-
-  mc.innerHTML = html;
-  document.getElementById('memHeader').textContent = '内存 Diff - A=#' + diffA + ' vs B=#' + diffB;
-}
-
-function renderHexDumpDiff(baseStr, hexA, hexB) {
-  const base = parseInt(baseStr, 16);
-  const bytesPerLine = 16;
-  const maxLen = Math.max(hexA.length, hexB.length);
-  const totalBytes = maxLen / 2;
-  const maxBytes = Math.min(totalBytes, 1024);
-  let html = '';
-  for (let off = 0; off < maxBytes; off += bytesPerLine) {
-    const addr = (base + off).toString(16).padStart(10, '0');
-    let hexPart = '';
-    let asciiPart = '';
-    const lineEnd = Math.min(bytesPerLine, maxBytes - off);
-    for (let j = 0; j < lineEnd; j++) {
-      const bi = (off + j) * 2;
-      const bA = hexA.substring(bi, bi + 2) || '  ';
-      const bB = hexB.substring(bi, bi + 2) || '  ';
-      const vA = parseInt(bA, 16);
-      const chA = (vA >= 32 && vA < 127) ? String.fromCharCode(vA) : '.';
-      if (bA !== bB) {
-        hexPart += '<span class="diff-del">' + bA + '</span> ';
-        asciiPart += '<span class="diff-del">' + escHtml(chA) + '</span>';
-      } else {
-        hexPart += bA + ' ';
-        asciiPart += escHtml(chA);
-      }
-    }
-    html += '<div class="hex-line"><span class="hex-addr">' + addr + '</span><span class="hex-bytes">' + hexPart + '</span><span class="hex-ascii">' + asciiPart + '</span></div>';
-  }
-  return html;
-}
 
 // ==================== 监控点 ====================
 let wpPollTimer = null;

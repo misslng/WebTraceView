@@ -447,6 +447,7 @@ type InstrInfo struct {
 	PC         uint64
 	InstrText  string
 	RegText    string
+	MemFlag    string // "", "R", "W", "RW"
 	NextOffset int64
 }
 
@@ -481,19 +482,41 @@ func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
 	}
 	p += int64(regLen)
 
-	// 跳过 readChunks + writeChunks 算 nextOffset
+	// 读 readChunks count
+	cntBuf := make([]byte, 4)
+	if _, err := f.ReadAt(cntBuf, p); err != nil {
+		return nil, fmt.Errorf("read chunk count failed")
+	}
+	readCnt := binary.LittleEndian.Uint32(cntBuf)
+
 	buf := make([]byte, 16)
 	p = skipChunkGroupFile(f, p, buf)
 	if p < 0 {
 		return nil, fmt.Errorf("skip read chunks failed")
 	}
+
+	// 读 writeChunks count
+	if _, err := f.ReadAt(cntBuf, p); err != nil {
+		return nil, fmt.Errorf("write chunk count failed")
+	}
+	writeCnt := binary.LittleEndian.Uint32(cntBuf)
+
 	p = skipChunkGroupFile(f, p, buf)
 	if p < 0 {
 		return nil, fmt.Errorf("skip write chunks failed")
 	}
 
+	memFlag := ""
+	if readCnt > 0 && writeCnt > 0 {
+		memFlag = "RW"
+	} else if readCnt > 0 {
+		memFlag = "R"
+	} else if writeCnt > 0 {
+		memFlag = "W"
+	}
+
 	return &InstrInfo{
-		PC: pc, InstrText: string(instrBuf), RegText: string(regBuf), NextOffset: p,
+		PC: pc, InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
 	}, nil
 }
 
@@ -600,11 +623,12 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 	defer db.putFile(f)
 
 	type Item struct {
-		Index int    `json:"index"`
-		PC    string `json:"pc"`
-		Instr string `json:"instrText"`
-		Regs  string `json:"regText"`
-		Depth int    `json:"depth"`
+		Index   int    `json:"index"`
+		PC      string `json:"pc"`
+		Instr   string `json:"instrText"`
+		Regs    string `json:"regText"`
+		Depth   int    `json:"depth"`
+		MemFlag string `json:"memFlag,omitempty"`
 	}
 
 	items := make([]Item, 0, end-off)
@@ -620,11 +644,12 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 		}
 		db.depthMu.RUnlock()
 		items = append(items, Item{
-			Index: i,
-			PC:    fmt.Sprintf("0x%x", info.PC),
-			Instr: info.InstrText,
-			Regs:  info.RegText,
-			Depth: depth,
+			Index:   i,
+			PC:      fmt.Sprintf("0x%x", info.PC),
+			Instr:   info.InstrText,
+			Regs:    info.RegText,
+			Depth:   depth,
+			MemFlag: info.MemFlag,
 		})
 		fileOff = info.NextOffset
 	}
