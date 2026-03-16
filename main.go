@@ -126,6 +126,7 @@ func main() {
 	http.HandleFunc("/api/memory", handleMemory)
 	http.HandleFunc("/api/search", handleSearch)
 	http.HandleFunc("/api/search/results", handleSearchResults)
+	http.HandleFunc("/api/search/instr", handleSearchInstr)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -871,6 +872,210 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 			job.mu.Unlock()
 			off += pos + len(job.pattern)
 		}
+	}
+}
+
+// ==================== 指令搜索 ====================
+
+var (
+	instrSearch   *InstrSearchJob
+	instrSearchMu sync.Mutex
+)
+
+type InstrSearchMatch struct {
+	Index int    `json:"index"`
+	PC    string `json:"pc"`
+	Instr string `json:"instrText"`
+	Regs  string `json:"regText"`
+	Depth int    `json:"depth"`
+}
+
+type InstrSearchJob struct {
+	id      string
+	keyword string
+
+	mu      sync.Mutex
+	matches []InstrSearchMatch
+
+	scanned atomic.Int64
+	done    atomic.Bool
+	cancel  context.CancelFunc
+}
+
+func handleSearchInstr(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req struct {
+			Keyword string `json:"keyword"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Keyword == "" {
+			http.Error(w, "bad request", 400)
+			return
+		}
+
+		instrSearchMu.Lock()
+		if instrSearch != nil && instrSearch.cancel != nil {
+			instrSearch.cancel()
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		job := &InstrSearchJob{
+			id:      fmt.Sprintf("%d", time.Now().UnixNano()),
+			keyword: strings.ToLower(req.Keyword),
+			cancel:  cancel,
+		}
+		instrSearch = job
+		instrSearchMu.Unlock()
+
+		go runInstrSearch(ctx, job)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"searchId": job.id})
+		return
+	}
+
+	// GET — 获取结果
+	instrSearchMu.Lock()
+	job := instrSearch
+	instrSearchMu.Unlock()
+
+	if job == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": []interface{}{}, "done": true, "scanned": 0, "totalMatches": 0, "totalRecords": 0,
+		})
+		return
+	}
+
+	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	job.mu.Lock()
+	total := len(job.matches)
+	end := off + limit
+	if end > total {
+		end = total
+	}
+	var slice []InstrSearchMatch
+	if off < total {
+		slice = make([]InstrSearchMatch, end-off)
+		copy(slice, job.matches[off:end])
+	}
+	job.mu.Unlock()
+	if slice == nil {
+		slice = []InstrSearchMatch{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches":      slice,
+		"done":         job.done.Load(),
+		"scanned":      job.scanned.Load(),
+		"totalMatches": total,
+		"totalRecords": db.totalRecs.Load(),
+	})
+}
+
+func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
+	defer job.done.Store(true)
+
+	f, err := os.Open(db.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	br := bufio.NewReaderSize(f, 4*1024*1024)
+	magic := make([]byte, 4)
+	idx := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		if _, err := io.ReadFull(br, magic); err != nil {
+			return
+		}
+		if string(magic) != "UTRA" {
+			return
+		}
+
+		var pc uint64
+		if err := binary.Read(br, binary.LittleEndian, &pc); err != nil {
+			return
+		}
+
+		var instrLen uint16
+		if err := binary.Read(br, binary.LittleEndian, &instrLen); err != nil {
+			return
+		}
+		instrBuf := make([]byte, instrLen)
+		if _, err := io.ReadFull(br, instrBuf); err != nil {
+			return
+		}
+
+		var regLen uint16
+		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
+			return
+		}
+		regBuf := make([]byte, regLen)
+		if _, err := io.ReadFull(br, regBuf); err != nil {
+			return
+		}
+
+		// 跳 chunks
+		skipChunkGroupBufio(br)
+		skipChunkGroupBufio(br)
+
+		instrText := string(instrBuf)
+		regText := string(regBuf)
+		pcStr := fmt.Sprintf("0x%x", pc)
+
+		// 搜索：指令文本、PC、寄存器文本
+		haystack := strings.ToLower(instrText + " " + pcStr + " " + regText)
+		if strings.Contains(haystack, job.keyword) {
+			depth := 0
+			db.depthMu.RLock()
+			if idx < len(db.depths) {
+				depth = int(db.depths[idx])
+			}
+			db.depthMu.RUnlock()
+
+			job.mu.Lock()
+			job.matches = append(job.matches, InstrSearchMatch{
+				Index: idx, PC: pcStr, Instr: instrText, Regs: regText, Depth: depth,
+			})
+			job.mu.Unlock()
+		}
+
+		idx++
+		job.scanned.Store(int64(idx))
+
+		job.mu.Lock()
+		n := len(job.matches)
+		job.mu.Unlock()
+		if n >= 5000 {
+			return
+		}
+	}
+}
+
+func skipChunkGroupBufio(br *bufio.Reader) {
+	var cnt uint32
+	if err := binary.Read(br, binary.LittleEndian, &cnt); err != nil {
+		return
+	}
+	hdr := make([]byte, 12)
+	for i := uint32(0); i < cnt; i++ {
+		if _, err := io.ReadFull(br, hdr); err != nil {
+			return
+		}
+		dataLen := int64(binary.LittleEndian.Uint32(hdr[8:12]))
+		io.CopyN(io.Discard, br, dataLen)
 	}
 }
 

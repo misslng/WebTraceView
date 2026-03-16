@@ -20,6 +20,18 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .pager span { font-size: 12px; color: #9cdcfe; }
 .main { display: flex; flex: 1; overflow: hidden; }
 .instr-panel { width: 55%; border-right: 1px solid #404040; display: flex; flex-direction: column; }
+.instr-search { display: flex; gap: 6px; padding: 6px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; }
+.instr-search input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+.instr-search button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.instr-search button:hover { background: #505050; }
+.instr-search-progress { font-size: 11px; color: #808080; }
+.instr-search-results { max-height: 180px; overflow-y: auto; border-bottom: 1px solid #404040; background: #1a1a2e; }
+.isr-row { padding: 3px 8px; font-size: 11px; cursor: pointer; display: flex; gap: 8px; border-bottom: 1px solid #2a2a2a; white-space: nowrap; }
+.isr-row:hover { background: #264f78; }
+.isr-row .isr-idx { color: #858585; width: 60px; flex-shrink: 0; }
+.isr-row .isr-pc { color: #4ec9b0; width: 100px; flex-shrink: 0; }
+.isr-row .isr-instr { color: #dcdcaa; width: 180px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; }
+.isr-row .isr-regs { color: #9cdcfe; flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .mem-panel { width: 45%; display: flex; flex-direction: column; }
 .panel-header { background: #2d2d2d; padding: 6px 12px; font-size: 12px; color: #569cd6; border-bottom: 1px solid #404040; flex-shrink: 0; }
 .instr-container { flex: 1; overflow-y: auto; }
@@ -86,6 +98,13 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 <div class="main">
   <div class="instr-panel">
     <div class="panel-header">指令列表</div>
+    <div class="instr-search">
+      <input type="text" id="instrSearchInput" placeholder="搜索指令/地址/寄存器..." style="width:200px">
+      <button id="btnInstrSearch">搜索</button>
+      <button id="btnInstrSearchStop" style="display:none">停止</button>
+      <span class="instr-search-progress" id="instrSearchProgress"></span>
+    </div>
+    <div class="instr-search-results" id="instrSearchResults" style="display:none"></div>
     <div class="instr-container" id="instrContainer"></div>
   </div>
   <div class="mem-panel">
@@ -419,7 +438,108 @@ async function fetchJSON(url) {
   return r.json();
 }
 
-// ==================== 全局搜索 ====================
+// ==================== 指令搜索 ====================
+let instrSearchId = null;
+let instrSearchPollTimer = null;
+
+function initInstrSearch() {
+  document.getElementById('btnInstrSearch').addEventListener('click', startInstrSearch);
+  document.getElementById('instrSearchInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startInstrSearch();
+  });
+  document.getElementById('btnInstrSearchStop').addEventListener('click', stopInstrSearch);
+  document.getElementById('instrSearchResults').addEventListener('click', e => {
+    const row = e.target.closest('.isr-row');
+    if (row) {
+      const idx = parseInt(row.dataset.idx);
+      jumpToInstr(idx);
+    }
+  });
+}
+
+async function startInstrSearch() {
+  const keyword = document.getElementById('instrSearchInput').value.trim();
+  if (!keyword) return;
+
+  stopInstrSearch();
+
+  try {
+    const resp = await fetch('/api/search/instr', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({keyword})
+    });
+    const data = await resp.json();
+    instrSearchId = data.searchId;
+
+    document.getElementById('btnInstrSearch').style.display = 'none';
+    document.getElementById('btnInstrSearchStop').style.display = '';
+    document.getElementById('instrSearchResults').style.display = '';
+    document.getElementById('instrSearchResults').innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">搜索中...</div>';
+    document.getElementById('instrSearchProgress').textContent = '搜索中...';
+
+    instrSearchPollTimer = setInterval(pollInstrSearchResults, 500);
+  } catch(e) {
+    document.getElementById('instrSearchProgress').textContent = '搜索启动失败';
+  }
+}
+
+function stopInstrSearch() {
+  if (instrSearchPollTimer) {
+    clearInterval(instrSearchPollTimer);
+    instrSearchPollTimer = null;
+  }
+  document.getElementById('btnInstrSearch').style.display = '';
+  document.getElementById('btnInstrSearchStop').style.display = 'none';
+}
+
+async function pollInstrSearchResults() {
+  if (!instrSearchId) return;
+  try {
+    const data = await fetchJSON('/api/search/instr?offset=0&limit=200');
+    renderInstrSearchResults(data.matches || []);
+    const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
+    document.getElementById('instrSearchProgress').textContent =
+      '已扫描 ' + data.scanned.toLocaleString() + ' / ' + data.totalRecords.toLocaleString() +
+      ' (' + pct + '%)，命中 ' + data.totalMatches + ' 条';
+
+    if (data.done) {
+      stopInstrSearch();
+      document.getElementById('instrSearchProgress').textContent =
+        '搜索完成，共 ' + data.totalMatches + ' 条匹配';
+    }
+  } catch(e) {}
+}
+
+function renderInstrSearchResults(matches) {
+  const el = document.getElementById('instrSearchResults');
+  if (matches.length === 0) {
+    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
+    return;
+  }
+  let html = '';
+  for (const m of matches) {
+    html += '<div class="isr-row" data-idx="' + m.index + '">'
+      + '<span class="isr-idx">#' + m.index + '</span>'
+      + '<span class="isr-pc">' + m.pc + '</span>'
+      + '<span class="isr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="isr-regs">' + escHtml(m.regText) + '</span>'
+      + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+async function jumpToInstr(idx) {
+  const page = Math.floor(idx / PAGE_SIZE);
+  await gotoPage(page);
+  const row = container.querySelector('[data-idx="' + idx + '"]');
+  if (row) row.scrollIntoView({ block: 'center' });
+  selectInstruction(idx);
+}
+
+initInstrSearch();
+
+// ==================== 全局内存搜索 ====================
 let searchId = null;
 let searchPollTimer = null;
 
