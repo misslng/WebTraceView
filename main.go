@@ -186,9 +186,12 @@ func (db *TraceDB) buildIndexAsync() {
 			}
 			if !matched {
 				// 没匹配到，说明是 tail call 的 ret，depth 不变
-				// callDepth 保持不变（之前减了，加回来）
-				callDepth++
+				// callDepth 保持不变（ret 时没减，所以不用加回来）
 			}
+			// 回填 ret 那条指令的 depth（ret 应该和返回后的 depth 一致）
+			db.depthMu.Lock()
+			db.depths[len(db.depths)-1] = callDepth
+			db.depthMu.Unlock()
 		}
 
 		// 读 instrText
@@ -215,8 +218,8 @@ func (db *TraceDB) buildIndexAsync() {
 			mnemonic == "blraa" || mnemonic == "blrab" || mnemonic == "blraaz" || mnemonic == "blrabz"
 
 		if isRet {
-			callDepth--
 			pendingRet = true
+			// 先用当前 callDepth 占位，下一条指令匹配后会回填正确值
 		}
 
 		db.depthMu.Lock()
