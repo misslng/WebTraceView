@@ -78,8 +78,38 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .search-result-row .sr-instr { color: #dcdcaa; width: 160px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-result-row .sr-addr { color: #ce9178; width: 100px; flex-shrink: 0; }
 .search-result-row .sr-type { width: 30px; flex-shrink: 0; }
+.results-pager { display: flex; gap: 6px; padding: 3px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; font-size: 11px; color: #808080; }
+.results-pager button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.results-pager button:hover { background: #505050; }
+.results-pager button:disabled { opacity: 0.4; cursor: default; }
+.result-section { border-bottom: 1px solid #404040; }
+.result-section-header { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: #2a2a3a; cursor: pointer; font-size: 11px; color: #569cd6; user-select: none; }
+.result-section-header:hover { background: #333350; }
+.result-section-header .rs-arrow { transition: transform 0.15s; display: inline-block; }
+.result-section-header .rs-arrow.collapsed { transform: rotate(-90deg); }
+.result-section-header .rs-label { flex: 1; }
+.result-section-header .rs-badge { background: #404060; color: #d4d4d4; padding: 1px 6px; border-radius: 8px; font-size: 10px; }
+.result-section-body { overflow: hidden; }
+.result-section-body.collapsed { display: none; }
 .sr-type.read { color: #4ec9b0; }
 .sr-type.write { color: #ce9178; }
+/* 书签 */
+.bookmark-bar { display: flex; gap: 6px; padding: 4px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; align-items: center; }
+.bookmark-bar button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.bookmark-bar button:hover { background: #505050; }
+.bookmark-bar select { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; max-width: 300px; }
+.instr-row .bm-icon { color: #e2b714; flex-shrink: 0; font-size: 10px; width: 14px; text-align: center; }
+/* Diff */
+.diff-bar { display: flex; gap: 6px; padding: 4px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; font-size: 11px; }
+.diff-bar button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.diff-bar button:hover { background: #505050; }
+.diff-bar span { color: #808080; }
+.hex-bytes .diff-add { background: #1e4620; color: #4ec9b0; }
+.hex-bytes .diff-del { background: #4e1e1e; color: #ce9178; }
+.hex-ascii .diff-add { background: #1e4620; color: #4ec9b0; }
+.hex-ascii .diff-del { background: #4e1e1e; color: #ce9178; }
+/* 寄存器追踪 */
+.reg-trace-canvas { width: 100%; height: 120px; border-bottom: 1px solid #404040; background: #1a1a2e; }
 </style>
 </head>
 <body>
@@ -99,17 +129,34 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 <div class="main">
   <div class="instr-panel">
     <div class="panel-header">指令列表</div>
+    <div class="bookmark-bar">
+      <button id="btnAddBookmark" title="给当前选中指令添加书签">📌 添加书签</button>
+      <button id="btnDelBookmark" title="删除当前选中指令的书签">删除</button>
+      <select id="bookmarkList"><option value="">-- 书签列表 --</option></select>
+    </div>
     <div class="instr-search">
       <input type="text" id="instrSearchInput" placeholder="搜索指令/地址/寄存器..." style="width:200px">
       <button id="btnInstrSearch">搜索</button>
       <button id="btnInstrSearchStop" style="display:none">停止</button>
       <span class="instr-search-progress" id="instrSearchProgress"></span>
     </div>
-    <div class="instr-search-results" id="instrSearchResults" style="display:none"></div>
+    <div class="result-section" id="secInstrSearch" style="display:none">
+      <div class="result-section-header" onclick="toggleSection('secInstrSearch')">
+        <span class="rs-arrow">▼</span><span class="rs-label">🔎 指令搜索结果</span><span class="rs-badge" id="instrSearchBadge">0</span>
+      </div>
+      <div class="result-section-body" id="instrSearchResults"></div>
+    </div>
     <div class="instr-container" id="instrContainer"></div>
   </div>
   <div class="mem-panel">
     <div class="panel-header" id="memHeader">内存访问窗口 (点击左侧指令查看)</div>
+    <div class="diff-bar">
+      <button id="btnDiffA">标记 A</button>
+      <button id="btnDiffB">标记 B</button>
+      <button id="btnDiffGo">Diff A↔B</button>
+      <button id="btnDiffClear">清除</button>
+      <span id="diffInfo"></span>
+    </div>
     <div class="mem-search">
       <input type="text" id="hlAddr" placeholder="地址 0x..." style="width:110px">
       <input type="text" id="hlSize" placeholder="size" style="width:50px" value="4">
@@ -122,13 +169,52 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <span id="localSearchInfo" style="font-size:11px;color:#808080"></span>
     </div>
     <div class="global-search">
-      <input type="text" id="searchPattern" placeholder="搜索 hex/字符串..." style="width:180px">
+      <input type="text" id="searchPattern" placeholder="全局内存搜索 hex/字符串..." style="width:180px">
       <select id="searchType"><option value="hex">Hex</option><option value="string">String</option></select>
       <button id="btnSearch">搜索</button>
       <button id="btnStopSearch" style="display:none">停止</button>
       <span class="search-progress" id="searchProgress"></span>
     </div>
-    <div class="search-results" id="searchResults" style="display:none"></div>
+    <div class="global-search">
+      <input type="text" id="wpAddr" placeholder="监控地址 0x..." style="width:110px">
+      <input type="text" id="wpSize" placeholder="size" style="width:50px" value="8">
+      <button id="btnWatchpoint">监控点</button>
+      <button id="btnWpStop" style="display:none">停止</button>
+      <span style="color:#555">│</span>
+      <input type="text" id="regTraceInput" placeholder="寄存器 x0/sp..." style="width:90px">
+      <button id="btnRegTrace">追踪</button>
+      <button id="btnRegTraceStop" style="display:none">停止</button>
+      <span style="color:#555">│</span>
+      <button id="btnFuncList">函数列表</button>
+      <span id="wpRegProgress" style="font-size:11px;color:#808080"></span>
+    </div>
+    <div class="result-section" id="secWpResults" style="display:none">
+      <div class="result-section-header" onclick="toggleSection('secWpResults')">
+        <span class="rs-arrow">▼</span><span class="rs-label">📍 监控点结果</span><span class="rs-badge" id="wpBadge">0</span>
+      </div>
+      <div class="result-section-body" id="wpResults"></div>
+    </div>
+    <div class="result-section" id="secRegTrace" style="display:none">
+      <div class="result-section-header" onclick="toggleSection('secRegTrace')">
+        <span class="rs-arrow">▼</span><span class="rs-label">📊 寄存器追踪</span><span class="rs-badge" id="regBadge">0</span>
+      </div>
+      <div class="result-section-body">
+        <div id="regTraceResults"></div>
+        <canvas class="reg-trace-canvas" id="regTraceCanvas"></canvas>
+      </div>
+    </div>
+    <div class="result-section" id="secFuncList" style="display:none">
+      <div class="result-section-header" onclick="toggleSection('secFuncList')">
+        <span class="rs-arrow">▼</span><span class="rs-label">📋 函数列表</span><span class="rs-badge" id="funcBadge">0</span>
+      </div>
+      <div class="result-section-body" id="funcListResults"></div>
+    </div>
+    <div class="result-section" id="secSearchResults" style="display:none">
+      <div class="result-section-header" onclick="toggleSection('secSearchResults')">
+        <span class="rs-arrow">▼</span><span class="rs-label">🔍 全局内存搜索结果</span><span class="rs-badge" id="memSearchBadge">0</span>
+      </div>
+      <div class="result-section-body" id="searchResults"></div>
+    </div>
     <div class="mem-container" id="memContainer">
       <div class="loading">点击左侧任意指令查看该时刻的内存状态</div>
     </div>
@@ -400,8 +486,10 @@ function renderInstrRow(item, sel) {
   const depth = Math.max(0, item.depth || 0);
   const indent = depth > 0 ? '│'.repeat(Math.min(depth, 20)) + ' ' : '';
   const marker = isCall ? '▶ ' : isRet ? '◀ ' : '';
+  const bmIcon = bookmarks[item.index] ? '📌' : '';
 
   return '<div class="instr-row' + sel + '" data-idx="' + item.index + '">'
+    + '<span class="bm-icon">' + bmIcon + '</span>'
     + '<span class="idx">' + item.index + '</span>'
     + '<span class="depth-bar">' + indent + '</span>'
     + '<span class="pc">' + item.pc + '</span>'
@@ -514,42 +602,43 @@ async function fetchJSON(url) {
 let instrSearchId = null;
 let instrSearchPollTimer = null;
 
+const instrSearchPR = new PagedResults({
+  el: document.getElementById('instrSearchResults'),
+  pageSize: 50,
+  fetchUrl: '/api/search/instr?_=1',
+  renderRow: (m) => {
+    return '<div class="isr-row" data-idx="' + m.index + '">'
+      + '<span class="isr-idx">#' + m.index + '</span>'
+      + '<span class="isr-pc">' + m.pc + '</span>'
+      + '<span class="isr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="isr-regs">' + escHtml(m.regText) + '</span></div>';
+  },
+  onClickRow: (row) => { jumpToInstr(parseInt(row.dataset.idx)); }
+});
+
 function initInstrSearch() {
   document.getElementById('btnInstrSearch').addEventListener('click', startInstrSearch);
-  document.getElementById('instrSearchInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') startInstrSearch();
-  });
+  document.getElementById('instrSearchInput').addEventListener('keydown', e => { if (e.key === 'Enter') startInstrSearch(); });
   document.getElementById('btnInstrSearchStop').addEventListener('click', stopInstrSearch);
-  document.getElementById('instrSearchResults').addEventListener('click', e => {
-    const row = e.target.closest('.isr-row');
-    if (row) {
-      const idx = parseInt(row.dataset.idx);
-      jumpToInstr(idx);
-    }
-  });
 }
 
 async function startInstrSearch() {
   const keyword = document.getElementById('instrSearchInput').value.trim();
   if (!keyword) return;
-
   stopInstrSearch();
-
+  instrSearchPR.reset();
   try {
     const resp = await fetch('/api/search/instr', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({keyword})
     });
     const data = await resp.json();
     instrSearchId = data.searchId;
-
+    instrSearchPR.fetchUrl = '/api/search/instr?_=1';
     document.getElementById('btnInstrSearch').style.display = 'none';
     document.getElementById('btnInstrSearchStop').style.display = '';
-    document.getElementById('instrSearchResults').style.display = '';
-    document.getElementById('instrSearchResults').innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">搜索中...</div>';
+    showSection('secInstrSearch');
     document.getElementById('instrSearchProgress').textContent = '搜索中...';
-
     instrSearchPollTimer = setInterval(pollInstrSearchResults, 500);
   } catch(e) {
     document.getElementById('instrSearchProgress').textContent = '搜索启动失败';
@@ -557,10 +646,7 @@ async function startInstrSearch() {
 }
 
 function stopInstrSearch() {
-  if (instrSearchPollTimer) {
-    clearInterval(instrSearchPollTimer);
-    instrSearchPollTimer = null;
-  }
+  if (instrSearchPollTimer) { clearInterval(instrSearchPollTimer); instrSearchPollTimer = null; }
   document.getElementById('btnInstrSearch').style.display = '';
   document.getElementById('btnInstrSearchStop').style.display = 'none';
 }
@@ -568,37 +654,18 @@ function stopInstrSearch() {
 async function pollInstrSearchResults() {
   if (!instrSearchId) return;
   try {
-    const data = await fetchJSON('/api/search/instr?offset=0&limit=200');
-    renderInstrSearchResults(data.matches || []);
+    const data = await fetchJSON('/api/search/instr?offset=0&limit=1');
     const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
     document.getElementById('instrSearchProgress').textContent =
       '已扫描 ' + data.scanned.toLocaleString() + ' / ' + data.totalRecords.toLocaleString() +
       ' (' + pct + '%)，命中 ' + data.totalMatches + ' 条';
-
+    instrSearchPR.update(data.totalMatches, data.done);
+    updateBadge('instrSearchBadge', data.totalMatches);
     if (data.done) {
       stopInstrSearch();
-      document.getElementById('instrSearchProgress').textContent =
-        '搜索完成，共 ' + data.totalMatches + ' 条匹配';
+      document.getElementById('instrSearchProgress').textContent = '搜索完成，共 ' + data.totalMatches + ' 条匹配';
     }
   } catch(e) {}
-}
-
-function renderInstrSearchResults(matches) {
-  const el = document.getElementById('instrSearchResults');
-  if (matches.length === 0) {
-    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
-    return;
-  }
-  let html = '';
-  for (const m of matches) {
-    html += '<div class="isr-row" data-idx="' + m.index + '">'
-      + '<span class="isr-idx">#' + m.index + '</span>'
-      + '<span class="isr-pc">' + m.pc + '</span>'
-      + '<span class="isr-instr">' + escHtml(m.instrText) + '</span>'
-      + '<span class="isr-regs">' + escHtml(m.regText) + '</span>'
-      + '</div>';
-  }
-  el.innerHTML = html;
 }
 
 async function jumpToInstr(idx) {
@@ -611,49 +678,156 @@ async function jumpToInstr(idx) {
 
 initInstrSearch();
 
+// ==================== 通用折叠面板 ====================
+function toggleSection(sectionId) {
+  const sec = document.getElementById(sectionId);
+  const body = sec.querySelector('.result-section-body');
+  const arrow = sec.querySelector('.rs-arrow');
+  if (body.classList.contains('collapsed')) {
+    body.classList.remove('collapsed');
+    arrow.classList.remove('collapsed');
+  } else {
+    body.classList.add('collapsed');
+    arrow.classList.add('collapsed');
+  }
+}
+
+function showSection(sectionId) {
+  document.getElementById(sectionId).style.display = '';
+}
+
+function updateBadge(badgeId, count) {
+  const el = document.getElementById(badgeId);
+  if (el) el.textContent = count;
+}
+
+// ==================== 通用分页结果管理器 ====================
+function PagedResults(opts) {
+  // opts: { el, pageSize, renderRow, onClickRow, fetchUrl }
+  this.el = opts.el;
+  this.pageSize = opts.pageSize || 50;
+  this.renderRow = opts.renderRow;
+  this.onClickRow = opts.onClickRow;
+  this.fetchUrl = opts.fetchUrl;
+  this.page = 0;
+  this.totalMatches = 0;
+  this.lastDone = false;
+
+  // 创建 DOM 结构
+  this.listEl = document.createElement('div');
+  this.listEl.style.maxHeight = '180px';
+  this.listEl.style.overflowY = 'auto';
+  this.pagerEl = document.createElement('div');
+  this.pagerEl.className = 'results-pager';
+  this.pagerEl.style.display = 'none';
+  this.el.appendChild(this.listEl);
+  this.el.appendChild(this.pagerEl);
+
+  this.listEl.addEventListener('click', (e) => {
+    const row = e.target.closest('.search-result-row');
+    if (row && this.onClickRow) this.onClickRow(row);
+  });
+}
+
+PagedResults.prototype.update = function(totalMatches, done) {
+  this.totalMatches = totalMatches;
+  this.lastDone = done;
+  this.renderPager();
+  this.loadPage(this.page);
+};
+
+PagedResults.prototype.renderPager = function() {
+  const totalPages = Math.max(1, Math.ceil(this.totalMatches / this.pageSize));
+  if (this.totalMatches <= this.pageSize) {
+    this.pagerEl.style.display = 'none';
+    return;
+  }
+  this.pagerEl.style.display = '';
+  this.pagerEl.innerHTML =
+    '<button class="pr-prev">◀</button>' +
+    '<span>' + (this.page + 1) + ' / ' + totalPages + ' (' + this.totalMatches + ' 条)</span>' +
+    '<button class="pr-next">▶</button>';
+  const prev = this.pagerEl.querySelector('.pr-prev');
+  const next = this.pagerEl.querySelector('.pr-next');
+  prev.disabled = this.page <= 0;
+  next.disabled = this.page >= totalPages - 1;
+  const self = this;
+  prev.onclick = () => { if (self.page > 0) { self.page--; self.loadPage(self.page); self.renderPager(); } };
+  next.onclick = () => { if (self.page < totalPages - 1) { self.page++; self.loadPage(self.page); self.renderPager(); } };
+};
+
+PagedResults.prototype.loadPage = async function(page) {
+  const off = page * this.pageSize;
+  try {
+    const data = await fetchJSON(this.fetchUrl + '&offset=' + off + '&limit=' + this.pageSize);
+    const matches = data.matches || [];
+    if (matches.length === 0) {
+      this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
+      return;
+    }
+    let html = '';
+    for (const m of matches) {
+      html += this.renderRow(m);
+    }
+    this.listEl.innerHTML = html;
+  } catch(e) {
+    this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">加载失败</div>';
+  }
+};
+
+PagedResults.prototype.reset = function() {
+  this.page = 0;
+  this.totalMatches = 0;
+  this.listEl.innerHTML = '';
+  this.pagerEl.style.display = 'none';
+};
+
 // ==================== 全局内存搜索 ====================
 let searchId = null;
 let searchPollTimer = null;
 
+const memSearchPR = new PagedResults({
+  el: document.getElementById('searchResults'),
+  pageSize: 50,
+  fetchUrl: '/api/search/results?_=1',
+  renderRow: (m) => {
+    const tc = m.type === 'write' ? 'write' : 'read';
+    const tl = m.type === 'write' ? 'W' : 'R';
+    return '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.chunkBase + '" data-plen="' + m.patternLen + '">'
+      + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
+      + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="sr-addr">' + m.chunkBase + '</span>'
+      + '<span class="sr-type ' + tc + '">[' + tl + ']</span></div>';
+  },
+  onClickRow: (row) => {
+    jumpToSearchResult(parseInt(row.dataset.idx), row.dataset.addr, parseInt(row.dataset.plen) || 1);
+  }
+});
+
 function initSearch() {
   document.getElementById('btnSearch').addEventListener('click', startSearch);
-  document.getElementById('searchPattern').addEventListener('keydown', e => {
-    if (e.key === 'Enter') startSearch();
-  });
+  document.getElementById('searchPattern').addEventListener('keydown', e => { if (e.key === 'Enter') startSearch(); });
   document.getElementById('btnStopSearch').addEventListener('click', stopSearch);
-  document.getElementById('searchResults').addEventListener('click', e => {
-    const row = e.target.closest('.search-result-row');
-    if (row) {
-      const idx = parseInt(row.dataset.idx);
-      const addr = row.dataset.addr;
-      const plen = parseInt(row.dataset.plen) || 1;
-      jumpToSearchResult(idx, addr, plen);
-    }
-  });
 }
 
 async function startSearch() {
   const pattern = document.getElementById('searchPattern').value.trim();
   const type = document.getElementById('searchType').value;
   if (!pattern) return;
-
   stopSearch();
-
+  memSearchPR.reset();
   try {
     const resp = await fetch('/api/search', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pattern, type})
     });
     const data = await resp.json();
     searchId = data.searchId;
-
+    memSearchPR.fetchUrl = '/api/search/results?id=' + searchId;
     document.getElementById('btnSearch').style.display = 'none';
     document.getElementById('btnStopSearch').style.display = '';
-    document.getElementById('searchResults').style.display = '';
-    document.getElementById('searchResults').innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">搜索中...</div>';
+    showSection('secSearchResults');
     document.getElementById('searchProgress').textContent = '搜索中...';
-
     searchPollTimer = setInterval(pollSearchResults, 500);
   } catch(e) {
     document.getElementById('searchProgress').textContent = '搜索启动失败';
@@ -661,10 +835,7 @@ async function startSearch() {
 }
 
 function stopSearch() {
-  if (searchPollTimer) {
-    clearInterval(searchPollTimer);
-    searchPollTimer = null;
-  }
+  if (searchPollTimer) { clearInterval(searchPollTimer); searchPollTimer = null; }
   document.getElementById('btnSearch').style.display = '';
   document.getElementById('btnStopSearch').style.display = 'none';
 }
@@ -672,51 +843,26 @@ function stopSearch() {
 async function pollSearchResults() {
   if (!searchId) return;
   try {
-    const data = await fetchJSON('/api/search/results?id=' + searchId + '&offset=0&limit=200');
-    renderSearchResults(data.matches || []);
+    const data = await fetchJSON('/api/search/results?id=' + searchId + '&offset=0&limit=1');
     const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
     document.getElementById('searchProgress').textContent =
       '已扫描 ' + data.scanned.toLocaleString() + ' / ' + data.totalRecords.toLocaleString() +
       ' (' + pct + '%)，命中 ' + data.totalMatches + ' 条';
-
+    memSearchPR.update(data.totalMatches, data.done);
+    updateBadge('memSearchBadge', data.totalMatches);
     if (data.done) {
       stopSearch();
-      document.getElementById('searchProgress').textContent =
-        '搜索完成，共 ' + data.totalMatches + ' 条匹配';
+      document.getElementById('searchProgress').textContent = '搜索完成，共 ' + data.totalMatches + ' 条匹配';
     }
   } catch(e) {}
 }
 
-function renderSearchResults(matches) {
-  const el = document.getElementById('searchResults');
-  if (matches.length === 0) {
-    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
-    return;
-  }
-  let html = '';
-  for (const m of matches) {
-    const typeClass = m.type === 'write' ? 'write' : 'read';
-    const typeLabel = m.type === 'write' ? 'W' : 'R';
-    html += '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.chunkBase + '" data-plen="' + m.patternLen + '">'
-      + '<span class="sr-idx">#' + m.index + '</span>'
-      + '<span class="sr-pc">' + m.pc + '</span>'
-      + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
-      + '<span class="sr-addr">' + m.chunkBase + '</span>'
-      + '<span class="sr-type ' + typeClass + '">[' + typeLabel + ']</span>'
-      + '</div>';
-  }
-  el.innerHTML = html;
-}
-
 async function jumpToSearchResult(idx, addrStr, patternLen) {
-  // 设置高亮
   const addr = parseInt(addrStr, 16);
   hlAddr = addr;
   hlSize = patternLen;
   document.getElementById('hlAddr').value = addrStr;
   document.getElementById('hlSize').value = patternLen;
-
-  // 跳转到对应页并选中指令
   const page = Math.floor(idx / PAGE_SIZE);
   await gotoPage(page);
   const row = container.querySelector('[data-idx="' + idx + '"]');
@@ -725,6 +871,390 @@ async function jumpToSearchResult(idx, addrStr, patternLen) {
 }
 
 initSearch();
+
+// ==================== 书签 ====================
+const bookmarks = JSON.parse(localStorage.getItem('wtv_bookmarks') || '{}');
+
+function saveBookmarks() {
+  localStorage.setItem('wtv_bookmarks', JSON.stringify(bookmarks));
+  refreshBookmarkList();
+}
+
+function refreshBookmarkList() {
+  const sel = document.getElementById('bookmarkList');
+  sel.innerHTML = '<option value="">-- 书签 (' + Object.keys(bookmarks).length + ') --</option>';
+  const keys = Object.keys(bookmarks).map(Number).sort((a,b) => a - b);
+  for (const k of keys) {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = '#' + k + ' - ' + bookmarks[k];
+    sel.appendChild(opt);
+  }
+}
+
+document.getElementById('btnAddBookmark').addEventListener('click', () => {
+  if (selectedIdx < 0) return;
+  const note = prompt('书签备注 (指令 #' + selectedIdx + '):', bookmarks[selectedIdx] || '');
+  if (note === null) return;
+  if (note === '') { delete bookmarks[selectedIdx]; }
+  else { bookmarks[selectedIdx] = note; }
+  saveBookmarks();
+  // 刷新当前页显示书签图标
+  if (pageItems.length) renderPage();
+});
+
+document.getElementById('btnDelBookmark').addEventListener('click', () => {
+  if (selectedIdx < 0 || !bookmarks[selectedIdx]) return;
+  delete bookmarks[selectedIdx];
+  saveBookmarks();
+  if (pageItems.length) renderPage();
+});
+
+document.getElementById('bookmarkList').addEventListener('change', async (e) => {
+  const idx = parseInt(e.target.value);
+  if (isNaN(idx)) return;
+  await jumpToInstr(idx);
+  e.target.value = '';
+});
+
+refreshBookmarkList();
+
+// ==================== 内存 Diff ====================
+let diffA = -1, diffB = -1;
+let diffRegionsA = null, diffRegionsB = null;
+
+document.getElementById('btnDiffA').addEventListener('click', () => {
+  if (selectedIdx < 0) return;
+  diffA = selectedIdx;
+  document.getElementById('diffInfo').textContent = 'A=#' + diffA + (diffB >= 0 ? ' B=#' + diffB : '');
+});
+
+document.getElementById('btnDiffB').addEventListener('click', () => {
+  if (selectedIdx < 0) return;
+  diffB = selectedIdx;
+  document.getElementById('diffInfo').textContent = (diffA >= 0 ? 'A=#' + diffA + ' ' : '') + 'B=#' + diffB;
+});
+
+document.getElementById('btnDiffClear').addEventListener('click', () => {
+  diffA = -1; diffB = -1;
+  diffRegionsA = null; diffRegionsB = null;
+  document.getElementById('diffInfo').textContent = '';
+  if (lastRegions) renderMemory(lastRegions);
+});
+
+document.getElementById('btnDiffGo').addEventListener('click', async () => {
+  if (diffA < 0 || diffB < 0) { alert('请先标记 A 和 B'); return; }
+  try {
+    const [dataA, dataB] = await Promise.all([
+      fetchJSON('/api/memory?index=' + diffA),
+      fetchJSON('/api/memory?index=' + diffB)
+    ]);
+    diffRegionsA = dataA.regions || [];
+    diffRegionsB = dataB.regions || [];
+    renderDiff();
+  } catch(e) {
+    document.getElementById('diffInfo').textContent = 'Diff 失败: ' + e.message;
+  }
+});
+
+function renderDiff() {
+  const mc = document.getElementById('memContainer');
+  if (!diffRegionsA || !diffRegionsB) return;
+
+  // 按 base 建立 B 的索引
+  const bMap = {};
+  for (const r of diffRegionsB) {
+    const key = r.base + '_' + r.type;
+    bMap[key] = r;
+  }
+
+  let html = '<div style="padding:6px;color:#569cd6;font-size:12px">Diff: A=#' + diffA + ' vs B=#' + diffB + '</div>';
+
+  for (const rA of diffRegionsA) {
+    const key = rA.base + '_' + rA.type;
+    const rB = bMap[key];
+    if (!rB) {
+      html += '<div class="mem-region"><div class="mem-region-header ' + rA.type + '">[' + (rA.type === 'write' ? 'W' : 'R') + '] ' + rA.base + ' (仅在 A)</div></div>';
+      continue;
+    }
+    html += '<div class="mem-region"><div class="mem-region-header ' + rA.type + '">[' + (rA.type === 'write' ? 'W' : 'R') + '] ' + rA.base + ' (' + rA.size + ' bytes)</div>';
+    html += '<div class="hex-dump">' + renderHexDumpDiff(rA.base, rA.hex, rB.hex) + '</div></div>';
+    delete bMap[key];
+  }
+
+  for (const key in bMap) {
+    const rB = bMap[key];
+    html += '<div class="mem-region"><div class="mem-region-header ' + rB.type + '">[' + (rB.type === 'write' ? 'W' : 'R') + '] ' + rB.base + ' (仅在 B)</div></div>';
+  }
+
+  mc.innerHTML = html;
+  document.getElementById('memHeader').textContent = '内存 Diff - A=#' + diffA + ' vs B=#' + diffB;
+}
+
+function renderHexDumpDiff(baseStr, hexA, hexB) {
+  const base = parseInt(baseStr, 16);
+  const bytesPerLine = 16;
+  const maxLen = Math.max(hexA.length, hexB.length);
+  const totalBytes = maxLen / 2;
+  const maxBytes = Math.min(totalBytes, 1024);
+  let html = '';
+  for (let off = 0; off < maxBytes; off += bytesPerLine) {
+    const addr = (base + off).toString(16).padStart(10, '0');
+    let hexPart = '';
+    let asciiPart = '';
+    const lineEnd = Math.min(bytesPerLine, maxBytes - off);
+    for (let j = 0; j < lineEnd; j++) {
+      const bi = (off + j) * 2;
+      const bA = hexA.substring(bi, bi + 2) || '  ';
+      const bB = hexB.substring(bi, bi + 2) || '  ';
+      const vA = parseInt(bA, 16);
+      const chA = (vA >= 32 && vA < 127) ? String.fromCharCode(vA) : '.';
+      if (bA !== bB) {
+        hexPart += '<span class="diff-del">' + bA + '</span> ';
+        asciiPart += '<span class="diff-del">' + escHtml(chA) + '</span>';
+      } else {
+        hexPart += bA + ' ';
+        asciiPart += escHtml(chA);
+      }
+    }
+    html += '<div class="hex-line"><span class="hex-addr">' + addr + '</span><span class="hex-bytes">' + hexPart + '</span><span class="hex-ascii">' + asciiPart + '</span></div>';
+  }
+  return html;
+}
+
+// ==================== 监控点 ====================
+let wpPollTimer = null;
+
+const wpPR = new PagedResults({
+  el: document.getElementById('wpResults'),
+  pageSize: 50,
+  fetchUrl: '/api/watchpoint/results?_=1',
+  renderRow: (m) => {
+    const tc = m.type === 'write' ? 'write' : 'read';
+    return '<div class="search-result-row" data-idx="' + m.index + '">'
+      + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
+      + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="sr-addr">' + m.chunkBase + '</span>'
+      + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span></div>';
+  },
+  onClickRow: (row) => { jumpToInstr(parseInt(row.dataset.idx)); }
+});
+
+document.getElementById('btnWatchpoint').addEventListener('click', async () => {
+  const addr = document.getElementById('wpAddr').value.trim();
+  const size = parseInt(document.getElementById('wpSize').value) || 8;
+  if (!addr) return;
+  if (wpPollTimer) clearInterval(wpPollTimer);
+  wpPR.reset();
+  try {
+    await fetch('/api/watchpoint', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({addr, size})
+    });
+    document.getElementById('btnWatchpoint').style.display = 'none';
+    document.getElementById('btnWpStop').style.display = '';
+    showSection('secWpResults');
+    wpPollTimer = setInterval(pollWpResults, 500);
+  } catch(e) {}
+});
+
+document.getElementById('btnWpStop').addEventListener('click', () => {
+  if (wpPollTimer) { clearInterval(wpPollTimer); wpPollTimer = null; }
+  document.getElementById('btnWatchpoint').style.display = '';
+  document.getElementById('btnWpStop').style.display = 'none';
+});
+
+async function pollWpResults() {
+  try {
+    const data = await fetchJSON('/api/watchpoint/results?offset=0&limit=1');
+    const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
+    document.getElementById('wpRegProgress').textContent =
+      '监控: ' + data.scanned.toLocaleString() + '/' + data.totalRecords.toLocaleString() + ' (' + pct + '%) 命中' + data.totalMatches;
+    wpPR.update(data.totalMatches, data.done);
+    updateBadge('wpBadge', data.totalMatches);
+    if (data.done) {
+      if (wpPollTimer) { clearInterval(wpPollTimer); wpPollTimer = null; }
+      document.getElementById('btnWatchpoint').style.display = '';
+      document.getElementById('btnWpStop').style.display = 'none';
+      document.getElementById('wpRegProgress').textContent = '监控完成，共 ' + data.totalMatches + ' 条';
+    }
+  } catch(e) {}
+}
+
+// ==================== 寄存器追踪 ====================
+let regPollTimer = null;
+let regTraceData = [];
+
+const regPR = new PagedResults({
+  el: document.getElementById('regTraceResults'),
+  pageSize: 50,
+  fetchUrl: '/api/search/reg/results?_=1',
+  renderRow: (m) => {
+    return '<div class="search-result-row" data-idx="' + m.index + '">'
+      + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
+      + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="sr-addr">' + m.value + '</span></div>';
+  },
+  onClickRow: (row) => { jumpToInstr(parseInt(row.dataset.idx)); }
+});
+
+document.getElementById('btnRegTrace').addEventListener('click', async () => {
+  const reg = document.getElementById('regTraceInput').value.trim();
+  if (!reg) return;
+  if (regPollTimer) clearInterval(regPollTimer);
+  regTraceData = [];
+  regPR.reset();
+  try {
+    await fetch('/api/search/reg', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reg})
+    });
+    document.getElementById('btnRegTrace').style.display = 'none';
+    document.getElementById('btnRegTraceStop').style.display = '';
+    showSection('secRegTrace');
+    regPollTimer = setInterval(pollRegTrace, 500);
+  } catch(e) {}
+});
+
+document.getElementById('btnRegTraceStop').addEventListener('click', () => {
+  if (regPollTimer) { clearInterval(regPollTimer); regPollTimer = null; }
+  document.getElementById('btnRegTrace').style.display = '';
+  document.getElementById('btnRegTraceStop').style.display = 'none';
+});
+
+async function pollRegTrace() {
+  try {
+    // 获取全部数据用于画图（limit 大一些）
+    const data = await fetchJSON('/api/search/reg/results?offset=0&limit=5000');
+    regTraceData = data.matches || [];
+    drawRegTraceChart();
+
+    const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
+    document.getElementById('wpRegProgress').textContent =
+      '追踪: ' + data.scanned.toLocaleString() + '/' + data.totalRecords.toLocaleString() + ' (' + pct + '%) 命中' + data.totalMatches;
+
+    regPR.update(data.totalMatches, data.done);
+    updateBadge('regBadge', data.totalMatches);
+
+    if (data.done) {
+      if (regPollTimer) { clearInterval(regPollTimer); regPollTimer = null; }
+      document.getElementById('btnRegTrace').style.display = '';
+      document.getElementById('btnRegTraceStop').style.display = 'none';
+      document.getElementById('wpRegProgress').textContent = '追踪完成，共 ' + data.totalMatches + ' 条';
+    }
+  } catch(e) {}
+}
+
+function drawRegTraceChart() {
+  const canvas = document.getElementById('regTraceCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  if (regTraceData.length < 2) return;
+
+  // 解析值
+  const points = regTraceData.map(m => {
+    let v = 0;
+    try { v = parseInt(m.value, 16); } catch(e) {}
+    return { idx: m.index, val: v };
+  });
+
+  const minVal = Math.min(...points.map(p => p.val));
+  const maxVal = Math.max(...points.map(p => p.val));
+  const range = maxVal - minVal || 1;
+  const minIdx = points[0].idx;
+  const maxIdx = points[points.length - 1].idx;
+  const idxRange = maxIdx - minIdx || 1;
+
+  const pad = 10;
+  const pw = w - pad * 2;
+  const ph = h - pad * 2;
+
+  ctx.strokeStyle = '#569cd6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const x = pad + (points[i].idx - minIdx) / idxRange * pw;
+    const y = pad + ph - (points[i].val - minVal) / range * ph;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // 标注最大最小值
+  ctx.fillStyle = '#808080';
+  ctx.font = '10px monospace';
+  ctx.fillText('0x' + maxVal.toString(16), pad, pad + 10);
+  ctx.fillText('0x' + minVal.toString(16), pad, h - pad);
+}
+
+// ==================== 函数列表 ====================
+let funcListData = [];
+let funcListPage = 0;
+const FUNC_PAGE_SIZE = 50;
+
+document.getElementById('btnFuncList').addEventListener('click', async () => {
+  const sec = document.getElementById('secFuncList');
+  if (sec.style.display !== 'none') {
+    // 已经加载过，切换折叠
+    toggleSection('secFuncList');
+    return;
+  }
+  showSection('secFuncList');
+  const el = document.getElementById('funcListResults');
+  el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">加载中...</div>';
+  try {
+    const data = await fetchJSON('/api/functions');
+    funcListData = data.functions || [];
+    funcListPage = 0;
+    updateBadge('funcBadge', funcListData.length);
+    renderFuncListPage();
+  } catch(e) {
+    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">加载失败</div>';
+  }
+});
+
+function renderFuncListPage() {
+  const el = document.getElementById('funcListResults');
+  if (funcListData.length === 0) {
+    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">无函数数据</div>';
+    return;
+  }
+  const totalPages = Math.ceil(funcListData.length / FUNC_PAGE_SIZE);
+  const start = funcListPage * FUNC_PAGE_SIZE;
+  const slice = funcListData.slice(start, start + FUNC_PAGE_SIZE);
+
+  let html = '<div style="max-height:180px;overflow-y:auto">';
+  for (const f of slice) {
+    html += '<div class="search-result-row" data-idx="' + f.firstCall + '" style="cursor:pointer">'
+      + '<span class="sr-pc">' + f.targetPC + '</span>'
+      + '<span class="sr-instr">调用 ' + f.callCount + ' 次</span>'
+      + '<span class="sr-idx">首次 #' + f.firstCall + '</span></div>';
+  }
+  html += '</div>';
+
+  if (totalPages > 1) {
+    html += '<div class="results-pager">'
+      + '<button onclick="funcListPage > 0 && (funcListPage--, renderFuncListPage())">◀</button>'
+      + '<span>' + (funcListPage + 1) + ' / ' + totalPages + ' (共 ' + funcListData.length + ' 个函数)</span>'
+      + '<button onclick="funcListPage < ' + (totalPages - 1) + ' && (funcListPage++, renderFuncListPage())">▶</button>'
+      + '</div>';
+  } else {
+    html += '<div style="padding:3px 8px;font-size:11px;color:#808080">共 ' + funcListData.length + ' 个函数</div>';
+  }
+  el.innerHTML = html;
+}
+
+document.getElementById('funcListResults').addEventListener('click', e => {
+  const row = e.target.closest('.search-result-row');
+  if (row) jumpToInstr(parseInt(row.dataset.idx));
+});
 
 init();
 </script>

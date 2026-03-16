@@ -52,7 +52,18 @@ type TraceDB struct {
 	depths  []int16
 	depthMu sync.RWMutex
 
+	// 函数摘要
+	funcMap map[uint64]*FuncEntry
+	funcMu  sync.RWMutex
+
 	pool sync.Pool
+}
+
+type FuncEntry struct {
+	CallCount   int
+	FirstCall   int
+	TotalInstr  int
+	lastCallIdx int
 }
 
 func (db *TraceDB) getFile() *os.File {
@@ -116,7 +127,7 @@ func main() {
 	}
 	log.Printf("文件大小: %.2f GB", float64(fi.Size())/(1024*1024*1024))
 
-	db = &TraceDB{path: binPath, size: fi.Size()}
+	db = &TraceDB{path: binPath, size: fi.Size(), funcMap: make(map[uint64]*FuncEntry)}
 	db.anchors = append(db.anchors, BlockAnchor{0, 0})
 
 	go db.buildIndexAsync()
@@ -127,6 +138,11 @@ func main() {
 	http.HandleFunc("/api/search", handleSearch)
 	http.HandleFunc("/api/search/results", handleSearchResults)
 	http.HandleFunc("/api/search/instr", handleSearchInstr)
+	http.HandleFunc("/api/watchpoint", handleWatchpoint)
+	http.HandleFunc("/api/watchpoint/results", handleWatchpointResults)
+	http.HandleFunc("/api/search/reg", handleSearchReg)
+	http.HandleFunc("/api/search/reg/results", handleSearchRegResults)
+	http.HandleFunc("/api/functions", handleFunctions)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -150,8 +166,9 @@ func (db *TraceDB) buildIndexAsync() {
 	magic := make([]byte, 4)
 	hdr := make([]byte, 12)
 	callDepth := int16(0)
-	retStack := make([]uint64, 0, 256) // bl 压入的返回地址栈
-	pendingRet := false                // 上一条是 ret，等下一条 PC 来匹配
+	retStack := make([]uint64, 0, 256)
+	pendingRet := false
+	pendingCallIdx := -1 // 上一条是 bl/blr 时记录其 index
 
 	for {
 		if _, err := io.ReadFull(br, magic); err != nil {
@@ -170,6 +187,20 @@ func (db *TraceDB) buildIndexAsync() {
 		}
 		pc = binary.LittleEndian.Uint64(pcBuf)
 		offset += 8
+
+		// 如果上一条是 bl/blr，当前 PC 就是被调用函数的入口
+		if pendingCallIdx >= 0 {
+			db.funcMu.Lock()
+			entry, ok := db.funcMap[pc]
+			if !ok {
+				entry = &FuncEntry{FirstCall: pendingCallIdx}
+				db.funcMap[pc] = entry
+			}
+			entry.CallCount++
+			entry.lastCallIdx = count
+			db.funcMu.Unlock()
+			pendingCallIdx = -1
+		}
 
 		// 如果上一条是 ret，用当前 PC 去栈里匹配
 		if pendingRet {
@@ -231,6 +262,7 @@ func (db *TraceDB) buildIndexAsync() {
 			// bl 的返回地址 = pc + 4
 			retStack = append(retStack, pc+4)
 			callDepth++
+			pendingCallIdx = count
 		}
 
 		// 跳 regText
@@ -297,6 +329,7 @@ func (db *TraceDB) buildIndexAsync() {
 	log.Printf("索引完成: %d 条, %d 个锚点, 耗时 %v", count, len(db.anchors), time.Since(t0))
 	log.Printf("调用层级: rawMin=%d, rawMax=%d, 归一化后 max=%d, final=%d",
 		minDepth, maxDepth, maxDepth-minDepth, finalDepth)
+	log.Printf("函数摘要: 共识别 %d 个不同函数", len(db.funcMap))
 	runtime.GC()
 }
 
@@ -828,7 +861,7 @@ func runSearch(ctx context.Context, job *SearchJob) {
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 5000 {
+		if n >= 50000 {
 			return
 		}
 	}
@@ -1058,7 +1091,7 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 5000 {
+		if n >= 50000 {
 			return
 		}
 	}
@@ -1077,6 +1110,375 @@ func skipChunkGroupBufio(br *bufio.Reader) {
 		dataLen := int64(binary.LittleEndian.Uint32(hdr[8:12]))
 		io.CopyN(io.Discard, br, dataLen)
 	}
+}
+
+// ==================== Watchpoint ====================
+
+var (
+	wpJob   *WatchpointJob
+	wpJobMu sync.Mutex
+)
+
+type WatchpointMatch struct {
+	Index     int    `json:"index"`
+	PC        string `json:"pc"`
+	InstrText string `json:"instrText"`
+	ChunkBase string `json:"chunkBase"`
+	ChunkType string `json:"type"`
+}
+
+type WatchpointJob struct {
+	id      string
+	addr    uint64
+	size    uint64
+	mu      sync.Mutex
+	matches []WatchpointMatch
+	scanned atomic.Int64
+	done    atomic.Bool
+	cancel  context.CancelFunc
+}
+
+func handleWatchpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		Addr string `json:"addr"`
+		Size int    `json:"size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	addr, err := strconv.ParseUint(strings.TrimPrefix(req.Addr, "0x"), 16, 64)
+	if err != nil || req.Size <= 0 {
+		http.Error(w, "invalid params", 400)
+		return
+	}
+
+	wpJobMu.Lock()
+	if wpJob != nil && wpJob.cancel != nil {
+		wpJob.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &WatchpointJob{
+		id: fmt.Sprintf("%d", time.Now().UnixNano()), addr: addr, size: uint64(req.Size), cancel: cancel,
+	}
+	wpJob = job
+	wpJobMu.Unlock()
+
+	go runWatchpoint(ctx, job)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"searchId": job.id})
+}
+
+func handleWatchpointResults(w http.ResponseWriter, r *http.Request) {
+	wpJobMu.Lock()
+	job := wpJob
+	wpJobMu.Unlock()
+	if job == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": []interface{}{}, "done": true, "scanned": 0, "totalMatches": 0, "totalRecords": 0,
+		})
+		return
+	}
+	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	job.mu.Lock()
+	total := len(job.matches)
+	end := off + limit
+	if end > total {
+		end = total
+	}
+	var slice []WatchpointMatch
+	if off < total {
+		slice = make([]WatchpointMatch, end-off)
+		copy(slice, job.matches[off:end])
+	}
+	job.mu.Unlock()
+	if slice == nil {
+		slice = []WatchpointMatch{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches": slice, "done": job.done.Load(), "scanned": job.scanned.Load(),
+		"totalMatches": total, "totalRecords": db.totalRecs.Load(),
+	})
+}
+
+func runWatchpoint(ctx context.Context, job *WatchpointJob) {
+	defer job.done.Store(true)
+	f, err := os.Open(db.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 4*1024*1024)
+	magic := make([]byte, 4)
+	idx := 0
+	wLo, wHi := job.addr, job.addr+job.size
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if _, err := io.ReadFull(br, magic); err != nil {
+			return
+		}
+		if string(magic) != "UTRA" {
+			return
+		}
+		var pc uint64
+		binary.Read(br, binary.LittleEndian, &pc)
+		var instrLen uint16
+		binary.Read(br, binary.LittleEndian, &instrLen)
+		instrBuf := make([]byte, instrLen)
+		io.ReadFull(br, instrBuf)
+		var regLen uint16
+		binary.Read(br, binary.LittleEndian, &regLen)
+		io.CopyN(io.Discard, br, int64(regLen))
+
+		// 检查 read chunks
+		wpCheckChunks(br, job, idx, pc, string(instrBuf), "read", wLo, wHi)
+		wpCheckChunks(br, job, idx, pc, string(instrBuf), "write", wLo, wHi)
+
+		idx++
+		job.scanned.Store(int64(idx))
+		job.mu.Lock()
+		n := len(job.matches)
+		job.mu.Unlock()
+		if n >= 50000 {
+			return
+		}
+	}
+}
+
+func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, instrText, chunkType string, wLo, wHi uint64) {
+	var cnt uint32
+	binary.Read(br, binary.LittleEndian, &cnt)
+	hdr := make([]byte, 12)
+	for i := uint32(0); i < cnt; i++ {
+		io.ReadFull(br, hdr)
+		base := binary.LittleEndian.Uint64(hdr[:8])
+		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
+		io.CopyN(io.Discard, br, int64(dataLen))
+		cLo, cHi := base, base+uint64(dataLen)
+		if cLo < wHi && cHi > wLo {
+			job.mu.Lock()
+			job.matches = append(job.matches, WatchpointMatch{
+				Index: idx, PC: fmt.Sprintf("0x%x", pc), InstrText: instrText,
+				ChunkBase: fmt.Sprintf("0x%x", base), ChunkType: chunkType,
+			})
+			job.mu.Unlock()
+		}
+	}
+}
+
+// ==================== 寄存器追踪 ====================
+
+var (
+	regJob   *RegTraceJob
+	regJobMu sync.Mutex
+)
+
+type RegTraceMatch struct {
+	Index int    `json:"index"`
+	PC    string `json:"pc"`
+	Instr string `json:"instrText"`
+	Value string `json:"value"`
+}
+
+type RegTraceJob struct {
+	id      string
+	reg     string
+	mu      sync.Mutex
+	matches []RegTraceMatch
+	scanned atomic.Int64
+	done    atomic.Bool
+	cancel  context.CancelFunc
+}
+
+func handleSearchReg(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		Reg string `json:"reg"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reg == "" {
+		http.Error(w, "bad request", 400)
+		return
+	}
+
+	regJobMu.Lock()
+	if regJob != nil && regJob.cancel != nil {
+		regJob.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &RegTraceJob{
+		id: fmt.Sprintf("%d", time.Now().UnixNano()), reg: strings.ToLower(req.Reg), cancel: cancel,
+	}
+	regJob = job
+	regJobMu.Unlock()
+
+	go runRegTrace(ctx, job)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"searchId": job.id})
+}
+
+func handleSearchRegResults(w http.ResponseWriter, r *http.Request) {
+	regJobMu.Lock()
+	job := regJob
+	regJobMu.Unlock()
+	if job == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": []interface{}{}, "done": true, "scanned": 0, "totalMatches": 0, "totalRecords": 0,
+		})
+		return
+	}
+	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 10000 {
+		limit = 200
+	}
+	job.mu.Lock()
+	total := len(job.matches)
+	end := off + limit
+	if end > total {
+		end = total
+	}
+	var slice []RegTraceMatch
+	if off < total {
+		slice = make([]RegTraceMatch, end-off)
+		copy(slice, job.matches[off:end])
+	}
+	job.mu.Unlock()
+	if slice == nil {
+		slice = []RegTraceMatch{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches": slice, "done": job.done.Load(), "scanned": job.scanned.Load(),
+		"totalMatches": total, "totalRecords": db.totalRecs.Load(),
+	})
+}
+
+func runRegTrace(ctx context.Context, job *RegTraceJob) {
+	defer job.done.Store(true)
+	f, err := os.Open(db.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 4*1024*1024)
+	magic := make([]byte, 4)
+	idx := 0
+	// 匹配 "=> ... reg=0xVALUE" 模式
+	regPrefix := job.reg + "="
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if _, err := io.ReadFull(br, magic); err != nil {
+			return
+		}
+		if string(magic) != "UTRA" {
+			return
+		}
+		var pc uint64
+		binary.Read(br, binary.LittleEndian, &pc)
+		var instrLen uint16
+		binary.Read(br, binary.LittleEndian, &instrLen)
+		instrBuf := make([]byte, instrLen)
+		io.ReadFull(br, instrBuf)
+		var regLen uint16
+		binary.Read(br, binary.LittleEndian, &regLen)
+		regBuf := make([]byte, regLen)
+		io.ReadFull(br, regBuf)
+
+		skipChunkGroupBufio(br)
+		skipChunkGroupBufio(br)
+
+		regText := strings.ToLower(string(regBuf))
+		// 查找 "=>" 后面的写寄存器部分
+		arrowIdx := strings.Index(regText, "=>")
+		if arrowIdx >= 0 {
+			writeRegs := regText[arrowIdx+2:]
+			if valIdx := strings.Index(writeRegs, regPrefix); valIdx >= 0 {
+				valStart := valIdx + len(regPrefix)
+				valEnd := valStart
+				for valEnd < len(writeRegs) && writeRegs[valEnd] != ' ' {
+					valEnd++
+				}
+				value := writeRegs[valStart:valEnd]
+				job.mu.Lock()
+				job.matches = append(job.matches, RegTraceMatch{
+					Index: idx, PC: fmt.Sprintf("0x%x", pc),
+					Instr: string(instrBuf), Value: value,
+				})
+				job.mu.Unlock()
+			}
+		}
+
+		idx++
+		job.scanned.Store(int64(idx))
+		job.mu.Lock()
+		n := len(job.matches)
+		job.mu.Unlock()
+		if n >= 50000 {
+			return
+		}
+	}
+}
+
+// ==================== 函数摘要 ====================
+
+type FuncInfo struct {
+	TargetPC   string `json:"targetPC"`
+	CallCount  int    `json:"callCount"`
+	FirstCall  int    `json:"firstCall"`
+	TotalInstr int    `json:"totalInstr"`
+}
+
+func handleFunctions(w http.ResponseWriter, r *http.Request) {
+	if !db.indexDone.Load() {
+		http.Error(w, "索引未完成", 503)
+		return
+	}
+
+	db.funcMu.RLock()
+	funcs := make([]FuncInfo, 0, len(db.funcMap))
+	for pc, info := range db.funcMap {
+		funcs = append(funcs, FuncInfo{
+			TargetPC:   fmt.Sprintf("0x%x", pc),
+			CallCount:  info.CallCount,
+			FirstCall:  info.FirstCall,
+			TotalInstr: info.TotalInstr,
+		})
+	}
+	db.funcMu.RUnlock()
+
+	sort.Slice(funcs, func(i, j int) bool { return funcs[i].CallCount > funcs[j].CallCount })
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"functions": funcs,
+		"total":     len(funcs),
+	})
 }
 
 func handleFrontend(w http.ResponseWriter, r *http.Request) {
