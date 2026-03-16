@@ -1373,9 +1373,13 @@ func handleSearchRegResults(w http.ResponseWriter, r *http.Request) {
 		slice = []RegTraceMatch{}
 	}
 	w.Header().Set("Content-Type", "application/json")
+	totalRecs := db.totalRecs.Load()
+	if job.to > 0 && job.from >= 0 {
+		totalRecs = int64(job.to - job.from)
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"matches": slice, "done": job.done.Load(), "scanned": job.scanned.Load(),
-		"totalMatches": total, "totalRecords": db.totalRecs.Load(),
+		"totalMatches": total, "totalRecords": totalRecs,
 	})
 }
 
@@ -1393,16 +1397,28 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		startIdx = job.from
 		seekOff := db.seekToRecord(startIdx)
 		if seekOff < 0 {
+			log.Printf("寄存器追踪: seekToRecord(%d) 失败", startIdx)
 			return
 		}
-		f.Seek(seekOff, 0)
+		log.Printf("寄存器追踪: from=%d, seekOff=%d", startIdx, seekOff)
+		if _, err := f.Seek(seekOff, 0); err != nil {
+			log.Printf("寄存器追踪: Seek 失败: %v", err)
+			return
+		}
 	}
 
 	br := bufio.NewReaderSize(f, 4*1024*1024)
 	magic := make([]byte, 4)
 	idx := startIdx
 	endIdx := job.to
+	if endIdx <= 0 {
+		endIdx = int(db.totalRecs.Load())
+	}
 	regPrefix := job.reg + "="
+	totalRange := endIdx - startIdx
+	if totalRange <= 0 {
+		totalRange = int(db.totalRecs.Load())
+	}
 
 	for {
 		// 如果指定了 to 且已超过范围，结束
