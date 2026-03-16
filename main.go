@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +47,10 @@ type TraceDB struct {
 	anchorMu  sync.RWMutex
 	indexDone atomic.Bool
 	totalRecs atomic.Int64
+
+	// 每条记录的调用深度
+	depths  []int16
+	depthMu sync.RWMutex
 
 	pool sync.Pool
 }
@@ -143,6 +148,9 @@ func (db *TraceDB) buildIndexAsync() {
 	count := 0
 	magic := make([]byte, 4)
 	hdr := make([]byte, 12)
+	callDepth := int16(0)
+	retStack := make([]uint64, 0, 256) // bl 压入的返回地址栈
+	pendingRet := false                // 上一条是 ret，等下一条 PC 来匹配
 
 	for {
 		if _, err := io.ReadFull(br, magic); err != nil {
@@ -153,22 +161,73 @@ func (db *TraceDB) buildIndexAsync() {
 		}
 		offset += 4
 
-		// 跳 pc(8)
-		if _, err := io.CopyN(io.Discard, br, 8); err != nil {
+		// 读 pc(8)
+		var pc uint64
+		pcBuf := make([]byte, 8)
+		if _, err := io.ReadFull(br, pcBuf); err != nil {
 			break
 		}
+		pc = binary.LittleEndian.Uint64(pcBuf)
 		offset += 8
 
-		// 跳 instrText
+		// 如果上一条是 ret，用当前 PC 去栈里匹配
+		if pendingRet {
+			pendingRet = false
+			matched := false
+			// 从栈顶往下找（最近的 bl 优先匹配）
+			for i := len(retStack) - 1; i >= 0; i-- {
+				if retStack[i] == pc {
+					// 匹配成功，弹出这个及以上的所有条目
+					retStack = retStack[:i]
+					callDepth = int16(i)
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				// 没匹配到，说明是 tail call 的 ret，depth 不变
+				// callDepth 保持不变（之前减了，加回来）
+				callDepth++
+			}
+		}
+
+		// 读 instrText
 		var instrLen uint16
 		if err := binary.Read(br, binary.LittleEndian, &instrLen); err != nil {
 			break
 		}
 		offset += 2
-		if _, err := io.CopyN(io.Discard, br, int64(instrLen)); err != nil {
+		instrBuf := make([]byte, instrLen)
+		if _, err := io.ReadFull(br, instrBuf); err != nil {
 			break
 		}
 		offset += int64(instrLen)
+
+		// 判断指令类型
+		instrText := strings.ToLower(string(instrBuf))
+		mnemonic := instrText
+		if idx := strings.IndexByte(instrText, ' '); idx > 0 {
+			mnemonic = instrText[:idx]
+		}
+
+		isRet := mnemonic == "ret"
+		isCall := mnemonic == "bl" || mnemonic == "blr" || mnemonic == "blx" ||
+			mnemonic == "blraa" || mnemonic == "blrab" || mnemonic == "blraaz" || mnemonic == "blrabz"
+
+		if isRet {
+			callDepth--
+			pendingRet = true
+		}
+
+		db.depthMu.Lock()
+		db.depths = append(db.depths, callDepth)
+		db.depthMu.Unlock()
+
+		if isCall {
+			// bl 的返回地址 = pc + 4
+			retStack = append(retStack, pc+4)
+			callDepth++
+		}
 
 		// 跳 regText
 		var regLen uint16
@@ -207,7 +266,33 @@ func (db *TraceDB) buildIndexAsync() {
 
 	db.totalRecs.Store(int64(count))
 	db.indexDone.Store(true)
+
+	// 归一化 depth：找到最小值，全部提升，让最小值变为 0
+	db.depthMu.Lock()
+	minDepth := int16(0)
+	maxDepth := int16(0)
+	for _, d := range db.depths {
+		if d < minDepth {
+			minDepth = d
+		}
+		if d > maxDepth {
+			maxDepth = d
+		}
+	}
+	if minDepth < 0 {
+		for i := range db.depths {
+			db.depths[i] -= minDepth
+		}
+	}
+	finalDepth := int16(0)
+	if len(db.depths) > 0 {
+		finalDepth = db.depths[len(db.depths)-1]
+	}
+	db.depthMu.Unlock()
+
 	log.Printf("索引完成: %d 条, %d 个锚点, 耗时 %v", count, len(db.anchors), time.Since(t0))
+	log.Printf("调用层级: rawMin=%d, rawMax=%d, 归一化后 max=%d, final=%d",
+		minDepth, maxDepth, maxDepth-minDepth, finalDepth)
 	runtime.GC()
 }
 
@@ -482,6 +567,7 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 		PC    string `json:"pc"`
 		Instr string `json:"instrText"`
 		Regs  string `json:"regText"`
+		Depth int    `json:"depth"`
 	}
 
 	items := make([]Item, 0, end-off)
@@ -490,11 +576,18 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
+		depth := 0
+		db.depthMu.RLock()
+		if i < len(db.depths) {
+			depth = int(db.depths[i])
+		}
+		db.depthMu.RUnlock()
 		items = append(items, Item{
 			Index: i,
 			PC:    fmt.Sprintf("0x%x", info.PC),
 			Instr: info.InstrText,
 			Regs:  info.RegText,
+			Depth: depth,
 		})
 		fileOff = info.NextOffset
 	}
