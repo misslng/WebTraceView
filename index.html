@@ -59,8 +59,9 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .hex-ascii .hl { background: #b5890069; color: #ffd700; font-weight: bold; }
 .loading { color: #808080; padding: 20px; text-align: center; font-size: 13px; }
 .status-bar { background: #007acc; color: white; padding: 2px 12px; font-size: 11px; flex-shrink: 0; display: flex; justify-content: space-between; }
-.mem-search { display: flex; gap: 6px; padding: 6px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; }
+.mem-search { display: flex; gap: 6px; padding: 6px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; align-items: center; flex-wrap: wrap; }
 .mem-search input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+.mem-search select { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; }
 .mem-search button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 .mem-search button:hover { background: #505050; }
 .global-search { display: flex; gap: 6px; padding: 6px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; flex-wrap: wrap; }
@@ -114,6 +115,11 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <input type="text" id="hlSize" placeholder="size" style="width:50px" value="4">
       <button id="btnHighlight">高亮</button>
       <button id="btnClearHl">清除</button>
+      <span style="color:#555">│</span>
+      <input type="text" id="localSearchInput" placeholder="当前窗口搜索..." style="width:140px">
+      <select id="localSearchType"><option value="hex">Hex</option><option value="string">String</option></select>
+      <button id="btnLocalSearch">查找</button>
+      <span id="localSearchInfo" style="font-size:11px;color:#808080"></span>
     </div>
     <div class="global-search">
       <input type="text" id="searchPattern" placeholder="搜索 hex/字符串..." style="width:180px">
@@ -223,7 +229,73 @@ async function init() {
   document.getElementById('btnClearHl').addEventListener('click', () => {
     hlAddr = -1; hlSize = 0;
     document.getElementById('hlAddr').value = '';
+    document.getElementById('localSearchInfo').textContent = '';
     if (lastRegions) renderMemory(lastRegions);
+  });
+
+  // 当前窗口搜索
+  function doLocalSearch() {
+    const input = document.getElementById('localSearchInput').value.trim();
+    const type = document.getElementById('localSearchType').value;
+    const info = document.getElementById('localSearchInfo');
+    if (!input || !lastRegions || lastRegions.length === 0) {
+      info.textContent = '无数据';
+      return;
+    }
+
+    let pattern;
+    if (type === 'hex') {
+      const clean = input.replace(/[^0-9a-fA-F]/g, '');
+      if (clean.length === 0 || clean.length % 2 !== 0) {
+        info.textContent = '无效 hex';
+        return;
+      }
+      pattern = clean.toLowerCase();
+    } else {
+      // string → 转成 hex
+      pattern = '';
+      for (let i = 0; i < input.length; i++) {
+        pattern += input.charCodeAt(i).toString(16).padStart(2, '0');
+      }
+    }
+
+    // 在所有 region 的 hex 数据里搜索
+    let matches = [];
+    for (const region of lastRegions) {
+      const hexData = region.hex.toLowerCase();
+      let pos = 0;
+      while (true) {
+        const idx = hexData.indexOf(pattern, pos);
+        if (idx < 0) break;
+        const byteOffset = idx / 2;
+        const matchAddr = parseInt(region.base, 16) + byteOffset;
+        matches.push({ addr: matchAddr, size: pattern.length / 2, type: region.type });
+        pos = idx + 2; // 按字节步进
+      }
+    }
+
+    if (matches.length === 0) {
+      info.textContent = '未找到';
+      return;
+    }
+
+    // 高亮第一个匹配
+    const first = matches[0];
+    hlAddr = first.addr;
+    hlSize = first.size;
+    document.getElementById('hlAddr').value = '0x' + first.addr.toString(16);
+    document.getElementById('hlSize').value = first.size;
+    renderMemory(lastRegions);
+
+    info.textContent = '找到 ' + matches.length + ' 处';
+
+    // 滚动到第一个高亮位置
+    const hlEl = document.querySelector('.hex-bytes .hl');
+    if (hlEl) hlEl.scrollIntoView({ block: 'center' });
+  }
+  document.getElementById('btnLocalSearch').addEventListener('click', doLocalSearch);
+  document.getElementById('localSearchInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLocalSearch();
   });
 
   // 索引未完成时定时刷新
