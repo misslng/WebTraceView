@@ -1299,6 +1299,8 @@ type RegTraceMatch struct {
 type RegTraceJob struct {
 	id      string
 	reg     string
+	from    int
+	to      int
 	mu      sync.Mutex
 	matches []RegTraceMatch
 	scanned atomic.Int64
@@ -1312,7 +1314,9 @@ func handleSearchReg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Reg string `json:"reg"`
+		Reg  string `json:"reg"`
+		From int    `json:"from"`
+		To   int    `json:"to"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Reg == "" {
 		http.Error(w, "bad request", 400)
@@ -1326,6 +1330,7 @@ func handleSearchReg(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	job := &RegTraceJob{
 		id: fmt.Sprintf("%d", time.Now().UnixNano()), reg: strings.ToLower(req.Reg), cancel: cancel,
+		from: req.From, to: req.To,
 	}
 	regJob = job
 	regJobMu.Unlock()
@@ -1381,13 +1386,29 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		return
 	}
 	defer f.Close()
+
+	// 如果指定了 from，用锚点跳过前面的记录
+	startIdx := 0
+	if job.from > 0 {
+		startIdx = job.from
+		seekOff := db.seekToRecord(startIdx)
+		if seekOff < 0 {
+			return
+		}
+		f.Seek(seekOff, 0)
+	}
+
 	br := bufio.NewReaderSize(f, 4*1024*1024)
 	magic := make([]byte, 4)
-	idx := 0
-	// 匹配 "=> ... reg=0xVALUE" 模式
+	idx := startIdx
+	endIdx := job.to
 	regPrefix := job.reg + "="
 
 	for {
+		// 如果指定了 to 且已超过范围，结束
+		if endIdx > 0 && idx > endIdx {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -1414,7 +1435,6 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		skipChunkGroupBufio(br)
 
 		regText := strings.ToLower(string(regBuf))
-		// 查找 "=>" 后面的写寄存器部分
 		arrowIdx := strings.Index(regText, "=>")
 		if arrowIdx >= 0 {
 			writeRegs := regText[arrowIdx+2:]
@@ -1435,7 +1455,7 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		}
 
 		idx++
-		job.scanned.Store(int64(idx))
+		job.scanned.Store(int64(idx) - int64(startIdx))
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()

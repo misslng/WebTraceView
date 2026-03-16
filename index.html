@@ -158,30 +158,31 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <span id="diffInfo"></span>
     </div>
     <div class="mem-search">
-      <input type="text" id="hlAddr" placeholder="地址 0x..." style="width:110px">
-      <input type="text" id="hlSize" placeholder="size" style="width:50px" value="4">
+      <input type="text" id="hlAddr" placeholder="地址 0x..." style="width:100px">
+      <input type="text" id="hlSize" placeholder="size" style="width:40px" value="4">
       <button id="btnHighlight">高亮</button>
       <button id="btnClearHl">清除</button>
       <span style="color:#555">│</span>
-      <input type="text" id="localSearchInput" placeholder="当前窗口搜索..." style="width:140px">
-      <select id="localSearchType"><option value="hex">Hex</option><option value="string">String</option></select>
+      <input type="text" id="localSearchInput" placeholder="当前搜索..." style="width:100px">
+      <select id="localSearchType"><option value="hex">Hex</option><option value="string">Str</option></select>
       <button id="btnLocalSearch">查找</button>
       <span id="localSearchInfo" style="font-size:11px;color:#808080"></span>
-    </div>
-    <div class="global-search">
-      <input type="text" id="searchPattern" placeholder="全局内存搜索 hex/字符串..." style="width:180px">
-      <select id="searchType"><option value="hex">Hex</option><option value="string">String</option></select>
+      <span style="color:#555">│</span>
+      <input type="text" id="searchPattern" placeholder="全局搜索..." style="width:100px">
+      <select id="searchType"><option value="hex">Hex</option><option value="string">Str</option></select>
       <button id="btnSearch">搜索</button>
       <button id="btnStopSearch" style="display:none">停止</button>
       <span class="search-progress" id="searchProgress"></span>
     </div>
-    <div class="global-search">
+    <div class="mem-search">
       <input type="text" id="wpAddr" placeholder="监控地址 0x..." style="width:110px">
       <input type="text" id="wpSize" placeholder="size" style="width:50px" value="8">
       <button id="btnWatchpoint">监控点</button>
       <button id="btnWpStop" style="display:none">停止</button>
       <span style="color:#555">│</span>
-      <input type="text" id="regTraceInput" placeholder="寄存器 x0/sp..." style="width:90px">
+      <input type="text" id="regTraceInput" placeholder="寄存器 x0/sp..." style="width:80px">
+      <input type="text" id="regTraceFrom" placeholder="从#" style="width:60px">
+      <input type="text" id="regTraceTo" placeholder="到#" style="width:60px">
       <button id="btnRegTrace">追踪</button>
       <button id="btnRegTraceStop" style="display:none">停止</button>
       <span style="color:#555">│</span>
@@ -1101,13 +1102,15 @@ const regPR = new PagedResults({
 document.getElementById('btnRegTrace').addEventListener('click', async () => {
   const reg = document.getElementById('regTraceInput').value.trim();
   if (!reg) return;
+  const from = parseInt(document.getElementById('regTraceFrom').value) || 0;
+  const to = parseInt(document.getElementById('regTraceTo').value) || 0;
   if (regPollTimer) clearInterval(regPollTimer);
   regTraceData = [];
   regPR.reset();
   try {
     await fetch('/api/search/reg', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({reg})
+      body: JSON.stringify({reg, from, to})
     });
     document.getElementById('btnRegTrace').style.display = 'none';
     document.getElementById('btnRegTraceStop').style.display = '';
