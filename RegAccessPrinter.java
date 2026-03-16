@@ -29,7 +29,7 @@ import java.util.Locale;
  *   RegAccessPrinter.initTraceFile(emulator, "trace_output.bin");
  *   RegAccessPrinter.shutdownTrace();
  */
-final class RegAccessPrinter {
+public class RegAccessPrinter {
 
     private final long address;
     private final Instruction instruction;
