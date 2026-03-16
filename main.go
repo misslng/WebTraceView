@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
@@ -68,6 +70,35 @@ func (db *TraceDB) putFile(f *os.File) {
 
 var db *TraceDB
 
+// ==================== 全局搜索 ====================
+
+type SearchMatch struct {
+	Index      int    `json:"index"`
+	PC         string `json:"pc"`
+	InstrText  string `json:"instrText"`
+	ChunkBase  string `json:"chunkBase"`
+	MatchOff   int    `json:"matchOffset"`
+	ChunkType  string `json:"type"` // "read" or "write"
+	PatternLen int    `json:"patternLen"`
+}
+
+type SearchJob struct {
+	id      string
+	pattern []byte
+
+	mu      sync.Mutex
+	matches []SearchMatch
+
+	scanned atomic.Int64
+	done    atomic.Bool
+	cancel  context.CancelFunc
+}
+
+var (
+	currentSearch   *SearchJob
+	currentSearchMu sync.Mutex
+)
+
 func main() {
 	binPath := "trace_output.bin"
 	if len(os.Args) > 1 {
@@ -88,6 +119,8 @@ func main() {
 	http.HandleFunc("/api/info", handleInfo)
 	http.HandleFunc("/api/instructions", handleInstructions)
 	http.HandleFunc("/api/memory", handleMemory)
+	http.HandleFunc("/api/search", handleSearch)
+	http.HandleFunc("/api/search/results", handleSearchResults)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -526,6 +559,223 @@ func handleMemory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"index": idx, "regions": result,
 	})
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", 405)
+		return
+	}
+	var req struct {
+		Pattern string `json:"pattern"`
+		Type    string `json:"type"` // "hex" or "string"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+
+	var pattern []byte
+	if req.Type == "hex" {
+		clean := ""
+		for _, c := range req.Pattern {
+			if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+				clean += string(c)
+			}
+		}
+		var err error
+		pattern, err = hex.DecodeString(clean)
+		if err != nil || len(pattern) == 0 {
+			http.Error(w, "invalid hex pattern", 400)
+			return
+		}
+	} else {
+		pattern = []byte(req.Pattern)
+		if len(pattern) == 0 {
+			http.Error(w, "empty pattern", 400)
+			return
+		}
+	}
+
+	// 取消旧搜索
+	currentSearchMu.Lock()
+	if currentSearch != nil && currentSearch.cancel != nil {
+		currentSearch.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	job := &SearchJob{
+		id:      fmt.Sprintf("%d", time.Now().UnixNano()),
+		pattern: pattern,
+		cancel:  cancel,
+	}
+	currentSearch = job
+	currentSearchMu.Unlock()
+
+	go runSearch(ctx, job)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"searchId": job.id,
+	})
+}
+
+func handleSearchResults(w http.ResponseWriter, r *http.Request) {
+	currentSearchMu.Lock()
+	job := currentSearch
+	currentSearchMu.Unlock()
+
+	if job == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": []interface{}{}, "done": true, "scanned": 0, "total": 0,
+		})
+		return
+	}
+
+	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	job.mu.Lock()
+	total := len(job.matches)
+	end := off + limit
+	if end > total {
+		end = total
+	}
+	var slice []SearchMatch
+	if off < total {
+		slice = make([]SearchMatch, end-off)
+		copy(slice, job.matches[off:end])
+	}
+	job.mu.Unlock()
+
+	if slice == nil {
+		slice = []SearchMatch{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches":      slice,
+		"done":         job.done.Load(),
+		"scanned":      job.scanned.Load(),
+		"totalMatches": total,
+		"totalRecords": db.totalRecs.Load(),
+	})
+}
+
+func runSearch(ctx context.Context, job *SearchJob) {
+	defer job.done.Store(true)
+
+	f, err := os.Open(db.path)
+	if err != nil {
+		log.Printf("搜索: 打开文件失败: %v", err)
+		return
+	}
+	defer f.Close()
+
+	br := bufio.NewReaderSize(f, 4*1024*1024)
+	magic := make([]byte, 4)
+	idx := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// 读 magic
+		if _, err := io.ReadFull(br, magic); err != nil {
+			return
+		}
+		if string(magic) != "UTRA" {
+			return
+		}
+
+		// 读 pc
+		var pc uint64
+		if err := binary.Read(br, binary.LittleEndian, &pc); err != nil {
+			return
+		}
+
+		// 读 instrText
+		var instrLen uint16
+		if err := binary.Read(br, binary.LittleEndian, &instrLen); err != nil {
+			return
+		}
+		instrBuf := make([]byte, instrLen)
+		if _, err := io.ReadFull(br, instrBuf); err != nil {
+			return
+		}
+
+		// 跳 regText
+		var regLen uint16
+		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
+			return
+		}
+		if _, err := io.CopyN(io.Discard, br, int64(regLen)); err != nil {
+			return
+		}
+
+		// 读 readChunks 并搜索
+		searchChunkGroup(br, job, idx, pc, string(instrBuf), "read")
+		// 读 writeChunks 并搜索
+		searchChunkGroup(br, job, idx, pc, string(instrBuf), "write")
+
+		idx++
+		job.scanned.Store(int64(idx))
+
+		// 匹配数上限
+		job.mu.Lock()
+		n := len(job.matches)
+		job.mu.Unlock()
+		if n >= 5000 {
+			return
+		}
+	}
+}
+
+func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, instrText string, chunkType string) {
+	var cnt uint32
+	if err := binary.Read(br, binary.LittleEndian, &cnt); err != nil {
+		return
+	}
+	hdr := make([]byte, 12)
+	for i := uint32(0); i < cnt; i++ {
+		if _, err := io.ReadFull(br, hdr); err != nil {
+			return
+		}
+		base := binary.LittleEndian.Uint64(hdr[:8])
+		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
+		data := make([]byte, dataLen)
+		if _, err := io.ReadFull(br, data); err != nil {
+			return
+		}
+
+		// 搜索所有匹配位置
+		off := 0
+		for {
+			pos := bytes.Index(data[off:], job.pattern)
+			if pos < 0 {
+				break
+			}
+			matchAddr := base + uint64(off+pos)
+			job.mu.Lock()
+			job.matches = append(job.matches, SearchMatch{
+				Index:      idx,
+				PC:         fmt.Sprintf("0x%x", pc),
+				InstrText:  instrText,
+				ChunkBase:  fmt.Sprintf("0x%x", matchAddr),
+				MatchOff:   off + pos,
+				ChunkType:  chunkType,
+				PatternLen: len(job.pattern),
+			})
+			job.mu.Unlock()
+			off += pos + len(job.pattern)
+		}
+	}
 }
 
 func handleFrontend(w http.ResponseWriter, r *http.Request) {

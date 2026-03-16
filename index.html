@@ -39,9 +39,31 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .hex-line { display: flex; }
 .hex-addr { color: #858585; width: 100px; flex-shrink: 0; }
 .hex-bytes { color: #ce9178; flex: 1; letter-spacing: 0.5px; }
+.hex-bytes .hl { background: #b5890069; color: #ffd700; font-weight: bold; }
 .hex-ascii { color: #6a9955; width: 140px; flex-shrink: 0; padding-left: 8px; }
+.hex-ascii .hl { background: #b5890069; color: #ffd700; font-weight: bold; }
 .loading { color: #808080; padding: 20px; text-align: center; font-size: 13px; }
 .status-bar { background: #007acc; color: white; padding: 2px 12px; font-size: 11px; flex-shrink: 0; display: flex; justify-content: space-between; }
+.mem-search { display: flex; gap: 6px; padding: 6px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; }
+.mem-search input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+.mem-search button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.mem-search button:hover { background: #505050; }
+.global-search { display: flex; gap: 6px; padding: 6px 8px; background: #252525; border-bottom: 1px solid #404040; align-items: center; flex-wrap: wrap; }
+.global-search input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+.global-search select { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; }
+.global-search button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.global-search button:hover { background: #505050; }
+.search-progress { font-size: 11px; color: #808080; }
+.search-results { max-height: 200px; overflow-y: auto; border-bottom: 1px solid #404040; }
+.search-result-row { padding: 3px 8px; font-size: 11px; cursor: pointer; display: flex; gap: 10px; border-bottom: 1px solid #2a2a2a; }
+.search-result-row:hover { background: #264f78; }
+.search-result-row .sr-idx { color: #858585; width: 60px; flex-shrink: 0; }
+.search-result-row .sr-pc { color: #4ec9b0; width: 100px; flex-shrink: 0; }
+.search-result-row .sr-instr { color: #dcdcaa; width: 160px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-row .sr-addr { color: #ce9178; width: 100px; flex-shrink: 0; }
+.search-result-row .sr-type { width: 30px; flex-shrink: 0; }
+.sr-type.read { color: #4ec9b0; }
+.sr-type.write { color: #ce9178; }
 </style>
 </head>
 <body>
@@ -65,6 +87,20 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   </div>
   <div class="mem-panel">
     <div class="panel-header" id="memHeader">内存访问窗口 (点击左侧指令查看)</div>
+    <div class="mem-search">
+      <input type="text" id="hlAddr" placeholder="地址 0x..." style="width:110px">
+      <input type="text" id="hlSize" placeholder="size" style="width:50px" value="4">
+      <button id="btnHighlight">高亮</button>
+      <button id="btnClearHl">清除</button>
+    </div>
+    <div class="global-search">
+      <input type="text" id="searchPattern" placeholder="搜索 hex/字符串..." style="width:180px">
+      <select id="searchType"><option value="hex">Hex</option><option value="string">String</option></select>
+      <button id="btnSearch">搜索</button>
+      <button id="btnStopSearch" style="display:none">停止</button>
+      <span class="search-progress" id="searchProgress"></span>
+    </div>
+    <div class="search-results" id="searchResults" style="display:none"></div>
     <div class="mem-container" id="memContainer">
       <div class="loading">点击左侧任意指令查看该时刻的内存状态</div>
     </div>
@@ -86,6 +122,8 @@ let selectedIdx = -1;
 let loading = false;
 let pollTimer = null;
 let minPageInView = 0;
+let hlAddr = -1, hlSize = 0;  // 高亮范围
+let lastRegions = null;       // 缓存当前显示的 regions
 
 const container = document.getElementById('instrContainer');
 
@@ -146,6 +184,24 @@ async function init() {
       }
       e.target.value = '';
     }
+  });
+
+  // 高亮搜索
+  function applyHighlight() {
+    const addrVal = document.getElementById('hlAddr').value.trim();
+    const sizeVal = parseInt(document.getElementById('hlSize').value) || 0;
+    if (!addrVal || sizeVal <= 0) return;
+    hlAddr = parseInt(addrVal, 16);
+    hlSize = sizeVal;
+    if (lastRegions) renderMemory(lastRegions);
+  }
+  document.getElementById('btnHighlight').addEventListener('click', applyHighlight);
+  document.getElementById('hlAddr').addEventListener('keydown', e => { if (e.key === 'Enter') applyHighlight(); });
+  document.getElementById('hlSize').addEventListener('keydown', e => { if (e.key === 'Enter') applyHighlight(); });
+  document.getElementById('btnClearHl').addEventListener('click', () => {
+    hlAddr = -1; hlSize = 0;
+    document.getElementById('hlAddr').value = '';
+    if (lastRegions) renderMemory(lastRegions);
   });
 
   // 索引未完成时定时刷新
@@ -277,6 +333,7 @@ async function selectInstruction(idx) {
   try {
     const data = await fetchJSON('/api/memory?index=' + idx);
     const regions = data.regions || [];
+    lastRegions = regions;
     renderMemory(regions);
     document.getElementById('statusBar').textContent = '第 ' + idx + ' 条，' + regions.length + ' 个内存区域';
   } catch (e) {
@@ -313,11 +370,19 @@ function renderHexDump(baseStr, hexStr) {
     let asciiPart = '';
     const lineEnd = Math.min(bytesPerLine, maxBytes - off);
     for (let j = 0; j < lineEnd; j++) {
+      const byteAddr = base + off + j;
       const bi = (off + j) * 2;
       const bh = hexStr.substring(bi, bi + 2);
-      hexPart += bh + ' ';
       const bv = parseInt(bh, 16);
-      asciiPart += (bv >= 32 && bv < 127) ? String.fromCharCode(bv) : '.';
+      const ch = (bv >= 32 && bv < 127) ? String.fromCharCode(bv) : '.';
+      const isHl = hlAddr >= 0 && byteAddr >= hlAddr && byteAddr < hlAddr + hlSize;
+      if (isHl) {
+        hexPart += '<span class="hl">' + bh + '</span> ';
+        asciiPart += '<span class="hl">' + escHtml(ch) + '</span>';
+      } else {
+        hexPart += bh + ' ';
+        asciiPart += escHtml(ch);
+      }
     }
     html += '<div class="hex-line">'
       + '<span class="hex-addr">' + addr + '</span>'
@@ -340,6 +405,121 @@ async function fetchJSON(url) {
   if (!r.ok) throw new Error(r.statusText);
   return r.json();
 }
+
+// ==================== 全局搜索 ====================
+let searchId = null;
+let searchPollTimer = null;
+
+function initSearch() {
+  document.getElementById('btnSearch').addEventListener('click', startSearch);
+  document.getElementById('searchPattern').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startSearch();
+  });
+  document.getElementById('btnStopSearch').addEventListener('click', stopSearch);
+  document.getElementById('searchResults').addEventListener('click', e => {
+    const row = e.target.closest('.search-result-row');
+    if (row) {
+      const idx = parseInt(row.dataset.idx);
+      const addr = row.dataset.addr;
+      const plen = parseInt(row.dataset.plen) || 1;
+      jumpToSearchResult(idx, addr, plen);
+    }
+  });
+}
+
+async function startSearch() {
+  const pattern = document.getElementById('searchPattern').value.trim();
+  const type = document.getElementById('searchType').value;
+  if (!pattern) return;
+
+  stopSearch();
+
+  try {
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pattern, type})
+    });
+    const data = await resp.json();
+    searchId = data.searchId;
+
+    document.getElementById('btnSearch').style.display = 'none';
+    document.getElementById('btnStopSearch').style.display = '';
+    document.getElementById('searchResults').style.display = '';
+    document.getElementById('searchResults').innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">搜索中...</div>';
+    document.getElementById('searchProgress').textContent = '搜索中...';
+
+    searchPollTimer = setInterval(pollSearchResults, 500);
+  } catch(e) {
+    document.getElementById('searchProgress').textContent = '搜索启动失败';
+  }
+}
+
+function stopSearch() {
+  if (searchPollTimer) {
+    clearInterval(searchPollTimer);
+    searchPollTimer = null;
+  }
+  document.getElementById('btnSearch').style.display = '';
+  document.getElementById('btnStopSearch').style.display = 'none';
+}
+
+async function pollSearchResults() {
+  if (!searchId) return;
+  try {
+    const data = await fetchJSON('/api/search/results?id=' + searchId + '&offset=0&limit=200');
+    renderSearchResults(data.matches || []);
+    const pct = data.totalRecords > 0 ? Math.floor(data.scanned / data.totalRecords * 100) : 0;
+    document.getElementById('searchProgress').textContent =
+      '已扫描 ' + data.scanned.toLocaleString() + ' / ' + data.totalRecords.toLocaleString() +
+      ' (' + pct + '%)，命中 ' + data.totalMatches + ' 条';
+
+    if (data.done) {
+      stopSearch();
+      document.getElementById('searchProgress').textContent =
+        '搜索完成，共 ' + data.totalMatches + ' 条匹配';
+    }
+  } catch(e) {}
+}
+
+function renderSearchResults(matches) {
+  const el = document.getElementById('searchResults');
+  if (matches.length === 0) {
+    el.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
+    return;
+  }
+  let html = '';
+  for (const m of matches) {
+    const typeClass = m.type === 'write' ? 'write' : 'read';
+    const typeLabel = m.type === 'write' ? 'W' : 'R';
+    html += '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.chunkBase + '" data-plen="' + m.patternLen + '">'
+      + '<span class="sr-idx">#' + m.index + '</span>'
+      + '<span class="sr-pc">' + m.pc + '</span>'
+      + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
+      + '<span class="sr-addr">' + m.chunkBase + '</span>'
+      + '<span class="sr-type ' + typeClass + '">[' + typeLabel + ']</span>'
+      + '</div>';
+  }
+  el.innerHTML = html;
+}
+
+async function jumpToSearchResult(idx, addrStr, patternLen) {
+  // 设置高亮
+  const addr = parseInt(addrStr, 16);
+  hlAddr = addr;
+  hlSize = patternLen;
+  document.getElementById('hlAddr').value = addrStr;
+  document.getElementById('hlSize').value = patternLen;
+
+  // 跳转到对应页并选中指令
+  const page = Math.floor(idx / PAGE_SIZE);
+  await gotoPage(page);
+  const row = container.querySelector('[data-idx="' + idx + '"]');
+  if (row) row.scrollIntoView({ block: 'center' });
+  selectInstruction(idx);
+}
+
+initSearch();
 
 init();
 </script>
