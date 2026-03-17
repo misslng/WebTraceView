@@ -858,6 +858,87 @@ func handleSearchResults(w http.ResponseWriter, r *http.Request) {
 func runSearch(ctx context.Context, job *SearchJob) {
 	defer job.done.Store(true)
 
+	// 等索引至少有一些锚点
+	for db.totalRecs.Load() == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 获取当前锚点快照
+	db.anchorMu.RLock()
+	anchors := make([]BlockAnchor, len(db.anchors))
+	copy(anchors, db.anchors)
+	db.anchorMu.RUnlock()
+
+	totalRecs := int(db.totalRecs.Load())
+
+	// 构建分段：每段覆盖若干锚点区间
+	type segment struct {
+		startIdx int
+		endIdx   int
+		offset   int64
+	}
+
+	// 并行度：CPU 核数，但不超过锚点数
+	workers := runtime.NumCPU()
+	if workers > len(anchors) {
+		workers = len(anchors)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	// 均匀分段
+	segments := make([]segment, 0, workers)
+	recsPerWorker := (totalRecs + workers - 1) / workers
+	for i := 0; i < workers; i++ {
+		startRec := i * recsPerWorker
+		endRec := (i + 1) * recsPerWorker
+		if endRec > totalRecs {
+			endRec = totalRecs
+		}
+		if startRec >= totalRecs {
+			break
+		}
+		// 找到最近的锚点
+		anchorIdx := sort.Search(len(anchors), func(j int) bool { return anchors[j].RecordIdx > startRec }) - 1
+		if anchorIdx < 0 {
+			anchorIdx = 0
+		}
+		seg := segment{
+			startIdx: anchors[anchorIdx].RecordIdx,
+			endIdx:   endRec,
+			offset:   anchors[anchorIdx].Offset,
+		}
+		// 避免和上一段重叠
+		if len(segments) > 0 && seg.startIdx <= segments[len(segments)-1].startIdx {
+			continue
+		}
+		segments = append(segments, seg)
+	}
+	// 修正段边界：每段的 endIdx = 下一段的 startIdx
+	for i := 0; i < len(segments)-1; i++ {
+		segments[i].endIdx = segments[i+1].startIdx
+	}
+	if len(segments) > 0 {
+		segments[len(segments)-1].endIdx = totalRecs
+	}
+
+	log.Printf("搜索: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
+
+	var wg sync.WaitGroup
+	for _, seg := range segments {
+		wg.Add(1)
+		go func(seg segment) {
+			defer wg.Done()
+			runSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(seg)
+	}
+	wg.Wait()
+}
+
+const SEARCH_MATCH_LIMIT = 500000
+
+func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, startIdx, endIdx int) {
 	f, err := os.Open(db.path)
 	if err != nil {
 		log.Printf("搜索: 打开文件失败: %v", err)
@@ -865,37 +946,40 @@ func runSearch(ctx context.Context, job *SearchJob) {
 	}
 	defer f.Close()
 
-	br := bufio.NewReaderSize(f, 4*1024*1024)
-	magic := make([]byte, 4)
-	idx := 0
+	if _, err := f.Seek(fileOffset, 0); err != nil {
+		return
+	}
 
-	for {
+	br := bufio.NewReaderSize(f, 8*1024*1024)
+	idx := startIdx
+
+	// 复用缓冲区减少 GC
+	instrBuf := make([]byte, 0, 256)
+	hdr := make([]byte, 14)
+
+	for idx < endIdx {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		// 读 magic
-		if _, err := io.ReadFull(br, magic); err != nil {
+		// 读 magic + pc + instrLen (14 bytes)
+		if _, err := io.ReadFull(br, hdr); err != nil {
 			return
 		}
-		if string(magic) != "UTRA" {
+		if string(hdr[:4]) != "UTRA" {
 			return
 		}
+		pc := binary.LittleEndian.Uint64(hdr[4:12])
+		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
 
-		// 读 pc
-		var pc uint64
-		if err := binary.Read(br, binary.LittleEndian, &pc); err != nil {
-			return
+		// 复用 instrBuf
+		if cap(instrBuf) < instrLen {
+			instrBuf = make([]byte, instrLen, instrLen*2)
+		} else {
+			instrBuf = instrBuf[:instrLen]
 		}
-
-		// 读 instrText
-		var instrLen uint16
-		if err := binary.Read(br, binary.LittleEndian, &instrLen); err != nil {
-			return
-		}
-		instrBuf := make([]byte, instrLen)
 		if _, err := io.ReadFull(br, instrBuf); err != nil {
 			return
 		}
@@ -915,13 +999,13 @@ func runSearch(ctx context.Context, job *SearchJob) {
 		searchChunkGroup(br, job, idx, pc, string(instrBuf), "write")
 
 		idx++
-		job.scanned.Store(int64(idx))
+		job.scanned.Add(1)
 
 		// 匹配数上限
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 50000 {
+		if n >= SEARCH_MATCH_LIMIT {
 			return
 		}
 	}
@@ -1106,40 +1190,115 @@ func handleSearchInstr(w http.ResponseWriter, r *http.Request) {
 func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 	defer job.done.Store(true)
 
+	for db.totalRecs.Load() == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	db.anchorMu.RLock()
+	anchors := make([]BlockAnchor, len(db.anchors))
+	copy(anchors, db.anchors)
+	db.anchorMu.RUnlock()
+
+	totalRecs := int(db.totalRecs.Load())
+
+	type segment struct {
+		startIdx int
+		endIdx   int
+		offset   int64
+	}
+
+	workers := runtime.NumCPU()
+	if workers > len(anchors) {
+		workers = len(anchors)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	segments := make([]segment, 0, workers)
+	recsPerWorker := (totalRecs + workers - 1) / workers
+	for i := 0; i < workers; i++ {
+		startRec := i * recsPerWorker
+		endRec := (i + 1) * recsPerWorker
+		if endRec > totalRecs {
+			endRec = totalRecs
+		}
+		if startRec >= totalRecs {
+			break
+		}
+		anchorIdx := sort.Search(len(anchors), func(j int) bool { return anchors[j].RecordIdx > startRec }) - 1
+		if anchorIdx < 0 {
+			anchorIdx = 0
+		}
+		seg := segment{
+			startIdx: anchors[anchorIdx].RecordIdx,
+			endIdx:   endRec,
+			offset:   anchors[anchorIdx].Offset,
+		}
+		if len(segments) > 0 && seg.startIdx <= segments[len(segments)-1].startIdx {
+			continue
+		}
+		segments = append(segments, seg)
+	}
+	for i := 0; i < len(segments)-1; i++ {
+		segments[i].endIdx = segments[i+1].startIdx
+	}
+	if len(segments) > 0 {
+		segments[len(segments)-1].endIdx = totalRecs
+	}
+
+	log.Printf("指令搜索: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
+
+	var wg sync.WaitGroup
+	for _, seg := range segments {
+		wg.Add(1)
+		go func(seg segment) {
+			defer wg.Done()
+			runInstrSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(seg)
+	}
+	wg.Wait()
+}
+
+func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset int64, startIdx, endIdx int) {
 	f, err := os.Open(db.path)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
-	br := bufio.NewReaderSize(f, 4*1024*1024)
-	magic := make([]byte, 4)
-	idx := 0
+	if _, err := f.Seek(fileOffset, 0); err != nil {
+		return
+	}
 
-	for {
+	br := bufio.NewReaderSize(f, 8*1024*1024)
+	hdr := make([]byte, 14)
+	idx := startIdx
+	instrBuf := make([]byte, 0, 256)
+	regBuf := make([]byte, 0, 512)
+
+	for idx < endIdx {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		if _, err := io.ReadFull(br, magic); err != nil {
+		if _, err := io.ReadFull(br, hdr); err != nil {
 			return
 		}
-		if string(magic) != "UTRA" {
-			return
-		}
-
-		var pc uint64
-		if err := binary.Read(br, binary.LittleEndian, &pc); err != nil {
+		if string(hdr[:4]) != "UTRA" {
 			return
 		}
 
-		var instrLen uint16
-		if err := binary.Read(br, binary.LittleEndian, &instrLen); err != nil {
-			return
+		pc := binary.LittleEndian.Uint64(hdr[4:12])
+		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+
+		if cap(instrBuf) < instrLen {
+			instrBuf = make([]byte, instrLen, instrLen*2)
+		} else {
+			instrBuf = instrBuf[:instrLen]
 		}
-		instrBuf := make([]byte, instrLen)
 		if _, err := io.ReadFull(br, instrBuf); err != nil {
 			return
 		}
@@ -1148,7 +1307,11 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
 			return
 		}
-		regBuf := make([]byte, regLen)
+		if cap(regBuf) < int(regLen) {
+			regBuf = make([]byte, regLen, int(regLen)*2)
+		} else {
+			regBuf = regBuf[:regLen]
+		}
 		if _, err := io.ReadFull(br, regBuf); err != nil {
 			return
 		}
@@ -1161,7 +1324,6 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 		regText := string(regBuf)
 		pcStr := fmt.Sprintf("0x%x", pc)
 
-		// 搜索：指令文本、PC、寄存器文本
 		haystack := strings.ToLower(instrText + " " + pcStr + " " + regText)
 		if strings.Contains(haystack, job.keyword) {
 			depth := 0
@@ -1179,12 +1341,12 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 		}
 
 		idx++
-		job.scanned.Store(int64(idx))
+		job.scanned.Add(1)
 
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 50000 {
+		if n >= SEARCH_MATCH_LIMIT {
 			return
 		}
 	}
@@ -1331,48 +1493,120 @@ func handleWatchpointResults(w http.ResponseWriter, r *http.Request) {
 
 func runWatchpoint(ctx context.Context, job *WatchpointJob) {
 	defer job.done.Store(true)
+
+	for db.totalRecs.Load() == 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	db.anchorMu.RLock()
+	anchors := make([]BlockAnchor, len(db.anchors))
+	copy(anchors, db.anchors)
+	db.anchorMu.RUnlock()
+
+	totalRecs := int(db.totalRecs.Load())
+
+	type segment struct {
+		startIdx int
+		endIdx   int
+		offset   int64
+	}
+
+	workers := runtime.NumCPU()
+	if workers > len(anchors) {
+		workers = len(anchors)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	segments := make([]segment, 0, workers)
+	recsPerWorker := (totalRecs + workers - 1) / workers
+	for i := 0; i < workers; i++ {
+		startRec := i * recsPerWorker
+		endRec := (i + 1) * recsPerWorker
+		if endRec > totalRecs {
+			endRec = totalRecs
+		}
+		if startRec >= totalRecs {
+			break
+		}
+		anchorIdx := sort.Search(len(anchors), func(j int) bool { return anchors[j].RecordIdx > startRec }) - 1
+		if anchorIdx < 0 {
+			anchorIdx = 0
+		}
+		seg := segment{
+			startIdx: anchors[anchorIdx].RecordIdx,
+			endIdx:   endRec,
+			offset:   anchors[anchorIdx].Offset,
+		}
+		if len(segments) > 0 && seg.startIdx <= segments[len(segments)-1].startIdx {
+			continue
+		}
+		segments = append(segments, seg)
+	}
+	for i := 0; i < len(segments)-1; i++ {
+		segments[i].endIdx = segments[i+1].startIdx
+	}
+	if len(segments) > 0 {
+		segments[len(segments)-1].endIdx = totalRecs
+	}
+
+	log.Printf("Watchpoint: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
+
+	var wg sync.WaitGroup
+	for _, seg := range segments {
+		wg.Add(1)
+		go func(seg segment) {
+			defer wg.Done()
+			runWatchpointSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(seg)
+	}
+	wg.Wait()
+}
+
+func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset int64, startIdx, endIdx int) {
 	f, err := os.Open(db.path)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	br := bufio.NewReaderSize(f, 4*1024*1024)
-	magic := make([]byte, 4)
-	idx := 0
+	if _, err := f.Seek(fileOffset, 0); err != nil {
+		return
+	}
+	br := bufio.NewReaderSize(f, 8*1024*1024)
+	hdr := make([]byte, 14)
+	idx := startIdx
 	wLo, wHi := job.addr, job.addr+job.size
 
-	for {
+	for idx < endIdx {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		if _, err := io.ReadFull(br, magic); err != nil {
+		if _, err := io.ReadFull(br, hdr); err != nil {
 			return
 		}
-		if string(magic) != "UTRA" {
+		if string(hdr[:4]) != "UTRA" {
 			return
 		}
-		var pc uint64
-		binary.Read(br, binary.LittleEndian, &pc)
-		var instrLen uint16
-		binary.Read(br, binary.LittleEndian, &instrLen)
+		pc := binary.LittleEndian.Uint64(hdr[4:12])
+		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
 		instrBuf := make([]byte, instrLen)
 		io.ReadFull(br, instrBuf)
 		var regLen uint16
 		binary.Read(br, binary.LittleEndian, &regLen)
 		io.CopyN(io.Discard, br, int64(regLen))
 
-		// 检查 read chunks
 		wpCheckChunks(br, job, idx, pc, string(instrBuf), "read", wLo, wHi)
 		wpCheckChunks(br, job, idx, pc, string(instrBuf), "write", wLo, wHi)
 
 		idx++
-		job.scanned.Store(int64(idx))
+		job.scanned.Add(1)
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 50000 {
+		if n >= SEARCH_MATCH_LIMIT {
 			return
 		}
 	}
@@ -1635,7 +1869,7 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		job.mu.Lock()
 		n := len(job.matches)
 		job.mu.Unlock()
-		if n >= 50000 {
+		if n >= SEARCH_MATCH_LIMIT {
 			return
 		}
 	}
