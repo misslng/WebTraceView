@@ -148,6 +148,20 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .comment-input-box button:hover { background: #505050; }
 .comment-input-box button.primary { background: #0e639c; border-color: #1177bb; }
 .comment-input-box button.primary:hover { background: #1177bb; }
+/* 云端笔记浮动框 */
+.notes-float { display: none; position: fixed; right: 40px; top: 80px; width: 380px; height: 420px; z-index: 998; background: #1e1e1e; border: 1px solid #555; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); flex-direction: column; resize: both; overflow: hidden; min-width: 260px; min-height: 200px; }
+.notes-float.open { display: flex; }
+.notes-drag-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #2d2d2d; border-bottom: 1px solid #404040; border-radius: 6px 6px 0 0; cursor: move; user-select: none; flex-shrink: 0; }
+.notes-drag-bar span { font-size: 12px; color: #569cd6; flex: 1; }
+.notes-drag-bar button { background: none; border: none; color: #808080; cursor: pointer; font-size: 14px; padding: 0 4px; }
+.notes-drag-bar button:hover { color: #d4d4d4; }
+.notes-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.notes-body textarea { flex: 1; background: #1a1a2e; color: #d4d4d4; border: none; padding: 10px; font-size: 12px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; resize: none; outline: none; line-height: 1.6; }
+.notes-body textarea::placeholder { color: #555; }
+.notes-footer { display: flex; align-items: center; gap: 8px; padding: 4px 10px; background: #2d2d2d; border-top: 1px solid #404040; border-radius: 0 0 6px 6px; flex-shrink: 0; }
+.notes-footer button { background: #0e639c; border: 1px solid #1177bb; color: #fff; padding: 3px 12px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.notes-footer button:hover { background: #1177bb; }
+.notes-footer .notes-status { font-size: 10px; color: #808080; flex: 1; text-align: right; }
 </style>
 </head>
 <body>
@@ -166,6 +180,8 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   <span style="color:#555">│</span>
   <button class="nav-btn" id="btnNavBack" title="后退 (Alt+Left)" disabled>⬅</button>
   <button class="nav-btn" id="btnNavForward" title="前进 (Alt+Right)" disabled>➡</button>
+  <span style="color:#555">│</span>
+  <button class="nav-btn" id="btnNotes" title="云端笔记">📝 笔记</button>
 </div>
 <div class="main">
   <div class="instr-panel">
@@ -313,6 +329,20 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   <span id="indexStatus"></span>
 </div>
 
+<div class="notes-float" id="notesFloat">
+  <div class="notes-drag-bar" id="notesDragBar">
+    <span>📝 云端笔记</span>
+    <button id="notesClose" title="关闭">✕</button>
+  </div>
+  <div class="notes-body">
+    <textarea id="notesTextarea" placeholder="在这里写笔记...&#10;支持自动保存到云端 session"></textarea>
+  </div>
+  <div class="notes-footer">
+    <button id="notesSave">💾 保存</button>
+    <span class="notes-status" id="notesStatus"></span>
+  </div>
+</div>
+
 <div id="timelineFloat" style="display:none;position:fixed;right:20px;top:60px;width:500px;height:400px;z-index:999;background:#1e1e1e;border:1px solid #555;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.5);display:none;flex-direction:column;resize:both;overflow:hidden">
   <div id="tlDragBar" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#2d2d2d;border-bottom:1px solid #404040;border-radius:6px 6px 0 0;cursor:move;user-select:none;flex-shrink:0">
     <span style="font-size:12px;color:#569cd6;flex:1">📊 函数调用流程</span>
@@ -341,6 +371,73 @@ let lastRegions = null;       // 缓存当前显示的 regions
 let navHistory = [];
 let navHistoryPos = -1;
 let navJumping = false; // 防止导航时重复 push
+
+// ==================== 云端笔记 ====================
+let _notesSaveTimer = null;
+
+function toggleNotes() {
+  const el = document.getElementById('notesFloat');
+  const isOpen = el.classList.contains('open');
+  if (isOpen) {
+    el.classList.remove('open');
+  } else {
+    el.classList.add('open');
+  }
+  saveSession();
+}
+
+function saveNotes() {
+  if (_notesSaveTimer) clearTimeout(_notesSaveTimer);
+  _notesSaveTimer = setTimeout(() => {
+    saveSession();
+    const status = document.getElementById('notesStatus');
+    status.textContent = '已保存 ' + new Date().toLocaleTimeString();
+    setTimeout(() => { status.textContent = ''; }, 2000);
+  }, 600);
+}
+
+function saveNotesNow() {
+  if (_notesSaveTimer) clearTimeout(_notesSaveTimer);
+  saveSession();
+  const status = document.getElementById('notesStatus');
+  status.textContent = '已保存 ' + new Date().toLocaleTimeString();
+  setTimeout(() => { status.textContent = ''; }, 2000);
+}
+
+// 笔记浮动框拖动
+(function() {
+  const floatEl = document.getElementById('notesFloat');
+  const dragBar = document.getElementById('notesDragBar');
+  let dragging = false, dx = 0, dy = 0;
+  dragBar.addEventListener('mousedown', e => {
+    if (e.target.tagName === 'BUTTON') return;
+    dragging = true;
+    dx = e.clientX - floatEl.offsetLeft;
+    dy = e.clientY - floatEl.offsetTop;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    floatEl.style.left = (e.clientX - dx) + 'px';
+    floatEl.style.top = (e.clientY - dy) + 'px';
+    floatEl.style.right = 'auto';
+  });
+  document.addEventListener('mouseup', () => {
+    if (dragging) { dragging = false; saveSession(); }
+  });
+
+  // 监听 resize（用 ResizeObserver）
+  const ro = new ResizeObserver(() => {
+    if (floatEl.classList.contains('open')) saveNotes();
+  });
+  ro.observe(floatEl);
+
+  // 按钮事件
+  document.getElementById('btnNotes').addEventListener('click', toggleNotes);
+  document.getElementById('notesClose').addEventListener('click', toggleNotes);
+  document.getElementById('notesSave').addEventListener('click', saveNotesNow);
+  document.getElementById('notesTextarea').addEventListener('input', saveNotes);
+})();
 
 function navPush(idx) {
   if (navJumping) return;
@@ -483,6 +580,19 @@ function collectSession() {
     funcSearchInput: document.getElementById('funcSearchInput').value,
     // 时间线搜索
     tlSearch: document.getElementById('tlSearch').value,
+    // 云端笔记
+    notesContent: document.getElementById('notesTextarea').value,
+    notesOpen: document.getElementById('notesFloat').classList.contains('open'),
+    notesRect: (function() {
+      const el = document.getElementById('notesFloat');
+      return {
+        left: el.style.left || '',
+        top: el.style.top || '',
+        right: el.style.right || '',
+        width: el.offsetWidth,
+        height: el.offsetHeight,
+      };
+    })(),
   };
 }
 
@@ -578,6 +688,23 @@ async function restoreSession(session) {
         document.getElementById('tlSearch').dispatchEvent(new Event('input'));
       }, 500);
     }
+  }
+
+  // 恢复云端笔记
+  if (session.notesContent) {
+    document.getElementById('notesTextarea').value = session.notesContent;
+  }
+  if (session.notesRect) {
+    const el = document.getElementById('notesFloat');
+    const r = session.notesRect;
+    if (r.left) el.style.left = r.left;
+    if (r.top) el.style.top = r.top;
+    if (r.left) el.style.right = 'auto';
+    if (r.width) el.style.width = r.width + 'px';
+    if (r.height) el.style.height = r.height + 'px';
+  }
+  if (session.notesOpen) {
+    document.getElementById('notesFloat').classList.add('open');
   }
 }
 
