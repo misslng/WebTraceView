@@ -1660,7 +1660,7 @@ func buildCallFlowLines() {
 				// call 行补上 To
 				// ret 行的 idx 指向返回后的下一条指令
 				lines = append(lines, CallFlowLine{
-					Type: "ret", PC: fmt.Sprintf("0x%x", top.pc), Depth: int(top.depth), From: top.index, To: ev.Index + 1,
+					Type: "ret", PC: fmt.Sprintf("0x%x", top.pc), Depth: int(top.depth), From: top.index, To: ev.Index,
 				})
 			}
 		}
