@@ -262,6 +262,138 @@ let lastRegions = null;       // 缓存当前显示的 regions
 
 const container = document.getElementById('instrContainer');
 
+// ==================== 云端会话持久化 ====================
+let _sessionSaveTimer = null;
+let _sessionLoaded = false;
+
+function collectSession() {
+  return {
+    currentPage,
+    selectedIdx,
+    hlAddr,
+    hlSize,
+    hlAddrInput: document.getElementById('hlAddr').value,
+    hlSizeInput: document.getElementById('hlSize').value,
+    bookmarks: typeof bookmarks !== 'undefined' ? bookmarks : {},
+    funcNames: typeof funcNames !== 'undefined' ? funcNames : {},
+    // 搜索词
+    instrSearchKeyword: document.getElementById('instrSearchInput').value,
+    globalSearchPattern: document.getElementById('searchPattern').value,
+    globalSearchType: document.getElementById('searchType').value,
+    localSearchInput: document.getElementById('localSearchInput').value,
+    localSearchType: document.getElementById('localSearchType').value,
+    // 监控点
+    wpAddr: document.getElementById('wpAddr').value,
+    wpSize: document.getElementById('wpSize').value,
+    // 寄存器追踪
+    regTraceReg: document.getElementById('regTraceInput').value,
+    regTraceFrom: document.getElementById('regTraceFrom').value,
+    regTraceTo: document.getElementById('regTraceTo').value,
+    // 跳转框
+    gotoBox: document.getElementById('gotoBox').value,
+    gotoPage: document.getElementById('gotoPage').value,
+    // 滚动位置
+    scrollTop: container.scrollTop,
+    // 时间线面板是否打开
+    timelineOpen: document.getElementById('timelineFloat').style.display === 'flex',
+    // 函数搜索
+    funcSearchInput: document.getElementById('funcSearchInput').value,
+    // 时间线搜索
+    tlSearch: document.getElementById('tlSearch').value,
+  };
+}
+
+function saveSession() {
+  if (_sessionSaveTimer) clearTimeout(_sessionSaveTimer);
+  _sessionSaveTimer = setTimeout(() => {
+    const data = collectSession();
+    fetch('/api/session', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    }).catch(() => {});
+  }, 800);
+}
+
+async function loadSession() {
+  try {
+    const resp = await fetch('/api/session');
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (!data || typeof data !== 'object') return null;
+    return data;
+  } catch(e) { return null; }
+}
+
+async function restoreSession(session) {
+  if (!session) return;
+  _sessionLoaded = true;
+
+  // 恢复书签
+  if (session.bookmarks && typeof session.bookmarks === 'object') {
+    for (const k of Object.keys(session.bookmarks)) {
+      bookmarks[k] = session.bookmarks[k];
+    }
+    saveBookmarksQuiet();
+    refreshBookmarkList();
+  }
+
+  // 恢复函数命名
+  if (session.funcNames && typeof session.funcNames === 'object') {
+    for (const k of Object.keys(session.funcNames)) {
+      funcNames[k] = session.funcNames[k];
+    }
+    saveFuncNamesQuiet();
+  }
+
+  // 恢复输入框
+  if (session.hlAddrInput) document.getElementById('hlAddr').value = session.hlAddrInput;
+  if (session.hlSizeInput) document.getElementById('hlSize').value = session.hlSizeInput;
+  if (session.instrSearchKeyword) document.getElementById('instrSearchInput').value = session.instrSearchKeyword;
+  if (session.globalSearchPattern) document.getElementById('searchPattern').value = session.globalSearchPattern;
+  if (session.globalSearchType) document.getElementById('searchType').value = session.globalSearchType;
+  if (session.localSearchInput) document.getElementById('localSearchInput').value = session.localSearchInput;
+  if (session.localSearchType) document.getElementById('localSearchType').value = session.localSearchType;
+  if (session.wpAddr) document.getElementById('wpAddr').value = session.wpAddr;
+  if (session.wpSize) document.getElementById('wpSize').value = session.wpSize;
+  if (session.regTraceReg) document.getElementById('regTraceInput').value = session.regTraceReg;
+  if (session.regTraceFrom) document.getElementById('regTraceFrom').value = session.regTraceFrom;
+  if (session.regTraceTo) document.getElementById('regTraceTo').value = session.regTraceTo;
+
+  // 恢复高亮
+  if (typeof session.hlAddr === 'number' && session.hlAddr >= 0) {
+    hlAddr = session.hlAddr;
+    hlSize = session.hlSize || 0;
+  }
+
+  // 恢复页码和选中行
+  if (typeof session.currentPage === 'number' && session.currentPage > 0) {
+    await gotoPage(session.currentPage);
+  }
+  if (typeof session.selectedIdx === 'number' && session.selectedIdx >= 0) {
+    selectedIdx = session.selectedIdx;
+    await selectInstruction(session.selectedIdx);
+    // 滚动到选中行
+    setTimeout(() => {
+      const row = container.querySelector('[data-idx="' + session.selectedIdx + '"]');
+      if (row) row.scrollIntoView({ block: 'center' });
+    }, 100);
+  } else if (typeof session.scrollTop === 'number') {
+    container.scrollTop = session.scrollTop;
+  }
+
+  // 恢复时间线面板
+  if (session.timelineOpen) {
+    document.getElementById('btnCallTimeline').click();
+    if (session.tlSearch) {
+      setTimeout(() => {
+        document.getElementById('tlSearch').value = session.tlSearch;
+        document.getElementById('tlSearch').dispatchEvent(new Event('input'));
+      }, 500);
+    }
+  }
+}
+
 async function init() {
   await refreshInfo();
   await loadPage(0);
@@ -330,14 +462,15 @@ async function init() {
     hlSize = sizeVal;
     if (lastRegions) renderMemory(lastRegions);
   }
-  document.getElementById('btnHighlight').addEventListener('click', applyHighlight);
-  document.getElementById('hlAddr').addEventListener('keydown', e => { if (e.key === 'Enter') applyHighlight(); });
-  document.getElementById('hlSize').addEventListener('keydown', e => { if (e.key === 'Enter') applyHighlight(); });
+  document.getElementById('btnHighlight').addEventListener('click', () => { applyHighlight(); saveSession(); });
+  document.getElementById('hlAddr').addEventListener('keydown', e => { if (e.key === 'Enter') { applyHighlight(); saveSession(); } });
+  document.getElementById('hlSize').addEventListener('keydown', e => { if (e.key === 'Enter') { applyHighlight(); saveSession(); } });
   document.getElementById('btnClearHl').addEventListener('click', () => {
     hlAddr = -1; hlSize = 0;
     document.getElementById('hlAddr').value = '';
     document.getElementById('localSearchInfo').textContent = '';
     if (lastRegions) renderMemory(lastRegions);
+    saveSession();
   });
 
   // 当前窗口搜索
@@ -413,6 +546,22 @@ async function init() {
       document.getElementById('indexStatus').textContent = '';
     }
   }, 2000);
+
+  // 恢复上次会话状态
+  const session = await loadSession();
+  if (session) await restoreSession(session);
+
+  // 输入框变化时自动保存会话
+  const sessionInputs = ['instrSearchInput','searchPattern','localSearchInput','wpAddr','wpSize','regTraceInput','regTraceFrom','regTraceTo','hlAddr','hlSize','funcSearchInput','tlSearch'];
+  for (const id of sessionInputs) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', saveSession);
+  }
+  // 页面关闭前保存
+  window.addEventListener('beforeunload', () => {
+    const data = collectSession();
+    navigator.sendBeacon('/api/session', JSON.stringify(data));
+  });
 }
 
 async function refreshInfo() {
@@ -446,6 +595,7 @@ function updatePagerUI() {
 async function gotoPage(page, mode) {
   if (page < 0 || page >= totalPages || loading) return;
   await loadPage(page, mode);
+  saveSession();
 }
 
 async function loadPage(page, mode) {
@@ -553,6 +703,8 @@ async function selectInstruction(idx) {
   container.querySelectorAll('.instr-row.selected').forEach(el => el.classList.remove('selected'));
   const row = container.querySelector('[data-idx="' + idx + '"]');
   if (row) row.classList.add('selected');
+
+  saveSession();
 
   const memContainer = document.getElementById('memContainer');
   document.getElementById('memHeader').textContent = '内存访问窗口 - 指令 #' + idx;
@@ -925,6 +1077,11 @@ const bookmarks = JSON.parse(localStorage.getItem('wtv_bookmarks') || '{}');
 function saveBookmarks() {
   localStorage.setItem('wtv_bookmarks', JSON.stringify(bookmarks));
   refreshBookmarkList();
+  saveSession();
+}
+
+function saveBookmarksQuiet() {
+  localStorage.setItem('wtv_bookmarks', JSON.stringify(bookmarks));
 }
 
 function refreshBookmarkList() {
@@ -1144,6 +1301,11 @@ function drawRegTraceChart() {
 const funcNames = JSON.parse(localStorage.getItem('wtv_funcnames') || '{}');
 
 function saveFuncNames() {
+  localStorage.setItem('wtv_funcnames', JSON.stringify(funcNames));
+  saveSession();
+}
+
+function saveFuncNamesQuiet() {
   localStorage.setItem('wtv_funcnames', JSON.stringify(funcNames));
 }
 

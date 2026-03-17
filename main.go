@@ -152,6 +152,7 @@ func main() {
 
 	db = &TraceDB{path: binPath, size: fi.Size(), funcMap: make(map[uint64]*FuncEntry)}
 	db.anchors = append(db.anchors, BlockAnchor{0, 0})
+	sessionPath = binPath + ".session.json"
 
 	go db.buildIndexAsync()
 
@@ -167,6 +168,7 @@ func main() {
 	http.HandleFunc("/api/search/reg/results", handleSearchRegResults)
 	http.HandleFunc("/api/functions", handleFunctions)
 	http.HandleFunc("/api/calltree", handleCallTimeline)
+	http.HandleFunc("/api/session", handleSession)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -1701,6 +1703,48 @@ func buildCallFlowLines() {
 	db.callFlowLines = lines
 	db.callFlowBuilt.Store(true)
 	log.Printf("调用流程缓存已构建，共 %d 行", len(lines))
+}
+
+// ==================== 会话持久化 ====================
+
+var sessionPath string
+var sessionMu sync.Mutex
+
+func handleSession(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case "GET":
+		sessionMu.Lock()
+		data, err := os.ReadFile(sessionPath)
+		sessionMu.Unlock()
+		if err != nil {
+			w.Write([]byte("{}"))
+			return
+		}
+		w.Write(data)
+	case "POST":
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body failed", 400)
+			return
+		}
+		// 校验是合法 JSON
+		var check json.RawMessage
+		if json.Unmarshal(body, &check) != nil {
+			http.Error(w, "invalid json", 400)
+			return
+		}
+		sessionMu.Lock()
+		err = os.WriteFile(sessionPath, body, 0644)
+		sessionMu.Unlock()
+		if err != nil {
+			http.Error(w, "write failed", 500)
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
 }
 
 func handleFrontend(w http.ResponseWriter, r *http.Request) {
