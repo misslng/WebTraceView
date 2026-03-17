@@ -870,6 +870,7 @@ function renderPage(mode) {
 }
 
 async function selectInstruction(idx) {
+  navPush(idx);
   selectedIdx = idx;
   container.querySelectorAll('.instr-row.selected').forEach(el => el.classList.remove('selected'));
   const row = container.querySelector('[data-idx="' + idx + '"]');
