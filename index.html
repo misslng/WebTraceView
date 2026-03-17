@@ -372,7 +372,7 @@ function showCommentDialog(idx) {
     if (val) { comments[idx] = val; }
     else { delete comments[idx]; }
     saveComments();
-    if (pageItems.length) renderPage();
+    if (pageItems.length) renderPage('keep');
     close();
   }
 
@@ -863,8 +863,9 @@ function renderPage(mode) {
   if (mode === 'append') {
     container.insertAdjacentHTML('beforeend', html);
   } else {
+    const prevScroll = container.scrollTop;
     container.innerHTML = html;
-    container.scrollTop = 0;
+    container.scrollTop = mode === 'keep' ? prevScroll : 0;
   }
 }
 
@@ -1447,14 +1448,14 @@ document.getElementById('btnAddBookmark').addEventListener('click', () => {
   else { bookmarks[selectedIdx] = note; }
   saveBookmarks();
   // 刷新当前页显示书签图标
-  if (pageItems.length) renderPage();
+  if (pageItems.length) renderPage('keep');
 });
 
 document.getElementById('btnDelBookmark').addEventListener('click', () => {
   if (selectedIdx < 0 || !bookmarks[selectedIdx]) return;
   delete bookmarks[selectedIdx];
   saveBookmarks();
-  if (pageItems.length) renderPage();
+  if (pageItems.length) renderPage('keep');
 });
 
 document.getElementById('bookmarkList').addEventListener('change', async (e) => {
@@ -1671,7 +1672,7 @@ function renameFuncPrompt(pc) {
   saveFuncNames();
   renderFuncListPage();
   // 刷新当前指令列表
-  if (pageItems.length) renderPage();
+  if (pageItems.length) renderPage('keep');
 }
 
 // ==================== 函数列表 ====================
