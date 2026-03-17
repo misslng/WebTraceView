@@ -55,6 +55,10 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .hex-addr { color: #858585; width: 100px; flex-shrink: 0; }
 .hex-bytes { color: #ce9178; flex: 1; letter-spacing: 0.5px; }
 .hex-bytes .hl { background: #b5890069; color: #ffd700; font-weight: bold; }
+.hex-bytes .active-read { background: #1e3a2e; color: #4ec9b0; font-weight: bold; }
+.hex-bytes .active-write { background: #3a1e1e; color: #ff8c69; font-weight: bold; }
+.hex-ascii .active-read { background: #1e3a2e; color: #4ec9b0; }
+.hex-ascii .active-write { background: #3a1e1e; color: #ff8c69; }
 .hex-ascii { color: #6a9955; width: 140px; flex-shrink: 0; padding-left: 8px; }
 .hex-ascii .hl { background: #b5890069; color: #ffd700; font-weight: bold; }
 .loading { color: #808080; padding: 20px; text-align: center; font-size: 13px; }
@@ -559,16 +563,20 @@ function renderMemory(regions) {
     const typeLabel = region.type === 'write' ? '[W]' : '[R]';
     html += '<div class="mem-region">'
       + '<div class="mem-region-header ' + typeClass + '">' + typeLabel + ' ' + escHtml(region.base) + ' (' + region.size + ' bytes)</div>'
-      + '<div class="hex-dump">' + renderHexDump(region.base, region.hex) + '</div></div>';
+      + '<div class="hex-dump">' + renderHexDump(region.base, region.hex, region.type) + '</div></div>';
   }
   mc.innerHTML = html;
 }
 
-function renderHexDump(baseStr, hexStr) {
+function renderHexDump(baseStr, hexStr, regionType) {
   const base = parseInt(baseStr, 16);
   const bytesPerLine = 16;
   const totalBytes = hexStr.length / 2;
   const maxBytes = Math.min(totalBytes, 1024);
+  // 实际访问的地址在 chunk 中心
+  const accessLo = base + Math.floor(totalBytes / 2) - 4;
+  const accessHi = base + Math.floor(totalBytes / 2) + 4;
+  const activeCls = regionType === 'write' ? 'active-write' : 'active-read';
   let html = '';
   for (let off = 0; off < maxBytes; off += bytesPerLine) {
     const addr = (base + off).toString(16).padStart(10, '0');
@@ -582,9 +590,13 @@ function renderHexDump(baseStr, hexStr) {
       const bv = parseInt(bh, 16);
       const ch = (bv >= 32 && bv < 127) ? String.fromCharCode(bv) : '.';
       const isHl = hlAddr >= 0 && byteAddr >= hlAddr && byteAddr < hlAddr + hlSize;
+      const isAccess = byteAddr >= accessLo && byteAddr < accessHi;
       if (isHl) {
         hexPart += '<span class="hl">' + bh + '</span> ';
         asciiPart += '<span class="hl">' + escHtml(ch) + '</span>';
+      } else if (isAccess) {
+        hexPart += '<span class="' + activeCls + '">' + bh + '</span> ';
+        asciiPart += '<span class="' + activeCls + '">' + escHtml(ch) + '</span>';
       } else {
         hexPart += bh + ' ';
         asciiPart += escHtml(ch);
