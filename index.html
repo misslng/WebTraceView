@@ -134,6 +134,11 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .nav-btn:disabled { opacity: 0.4; cursor: default; }
 /* 注释 */
 .instr-row .comment-text { color: #6a9955; font-style: italic; font-size: 10px; margin-left: 8px; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+/* 右键菜单 */
+.ctx-menu { position: fixed; z-index: 2000; background: #252526; border: 1px solid #555; border-radius: 4px; padding: 4px 0; min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); font-size: 11px; font-family: inherit; }
+.ctx-menu-item { padding: 4px 14px; color: #d4d4d4; cursor: pointer; white-space: nowrap; }
+.ctx-menu-item:hover { background: #094771; }
+.ctx-menu-sep { height: 1px; background: #444; margin: 3px 8px; }
 .comment-input-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; display: flex; align-items: center; justify-content: center; }
 .comment-input-box { background: #1e1e1e; border: 1px solid #555; border-radius: 6px; padding: 16px; width: 400px; }
 .comment-input-box h3 { font-size: 13px; color: #569cd6; margin-bottom: 8px; }
@@ -169,6 +174,8 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <button id="btnAddBookmark" title="给当前选中指令添加书签">📌 添加书签</button>
       <button id="btnDelBookmark" title="删除当前选中指令的书签">删除</button>
       <select id="bookmarkList"><option value="">-- 书签列表 --</option></select>
+      <span style="color:#555">│</span>
+      <select id="commentList"><option value="">-- 注释列表 --</option></select>
     </div>
     <div class="instr-search">
       <input type="text" id="instrSearchInput" placeholder="搜索指令/地址/寄存器..." style="width:200px">
@@ -373,6 +380,7 @@ const comments = {};
 
 function saveComments() {
   localStorage.setItem('wtv_comments', JSON.stringify(comments));
+  refreshCommentList();
   saveSession();
 }
 
@@ -404,7 +412,22 @@ function showCommentDialog(idx) {
     if (val) { comments[idx] = val; }
     else { delete comments[idx]; }
     saveComments();
-    if (pageItems.length) renderPage('keep');
+    // 只更新对应行的注释，不重渲染整个页面（避免多页模式下跳页）
+    const row = container.querySelector('[data-idx="' + idx + '"]');
+    if (row) {
+      let commentEl = row.querySelector('.comment-text');
+      if (val) {
+        if (!commentEl) {
+          commentEl = document.createElement('span');
+          commentEl.className = 'comment-text';
+          row.appendChild(commentEl);
+        }
+        commentEl.textContent = '; ' + val;
+        commentEl.title = val;
+      } else if (commentEl) {
+        commentEl.remove();
+      }
+    }
     close();
   }
 
@@ -512,6 +535,7 @@ async function restoreSession(session) {
       comments[k] = session.comments[k];
     }
     localStorage.setItem('wtv_comments', JSON.stringify(comments));
+    refreshCommentList();
   }
 
   // 恢复输入框
@@ -535,19 +559,14 @@ async function restoreSession(session) {
   }
 
   // 恢复页码和选中行
-  if (typeof session.currentPage === 'number' && session.currentPage > 0) {
-    await gotoPage(session.currentPage);
-  }
   if (typeof session.selectedIdx === 'number' && session.selectedIdx >= 0) {
     selectedIdx = session.selectedIdx;
-    await selectInstruction(session.selectedIdx);
-    // 滚动到选中行
-    setTimeout(() => {
-      const row = container.querySelector('[data-idx="' + session.selectedIdx + '"]');
-      if (row) row.scrollIntoView({ block: 'center' });
-    }, 100);
-  } else if (typeof session.scrollTop === 'number') {
-    container.scrollTop = session.scrollTop;
+    await jumpToInstr(session.selectedIdx);
+  } else if (typeof session.currentPage === 'number' && session.currentPage > 0) {
+    await gotoPage(session.currentPage);
+    if (typeof session.scrollTop === 'number') {
+      container.scrollTop = session.scrollTop;
+    }
   }
 
   // 恢复时间线面板
@@ -762,6 +781,81 @@ async function init() {
       showCommentDialog(parseInt(row.dataset.idx));
     }
   });
+
+  // 右键菜单
+  let ctxMenu = null;
+  function closeCtxMenu() {
+    if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; }
+  }
+  document.addEventListener('click', closeCtxMenu);
+  document.addEventListener('contextmenu', (e) => {
+    // 非指令行区域用默认右键
+    if (!e.target.closest('#instrContainer .instr-row')) closeCtxMenu();
+  });
+
+  container.addEventListener('contextmenu', e => {
+    const row = e.target.closest('.instr-row');
+    if (!row) return;
+    e.preventDefault();
+    closeCtxMenu();
+
+    const idx = row.dataset.idx;
+    const pcEl = row.querySelector('.pc');
+    const asmEl = row.querySelector('.asm');
+    const regsEl = row.querySelector('.regs');
+    const commentEl = row.querySelector('.comment-text');
+
+    const pc = pcEl ? pcEl.textContent.trim() : '';
+    const asm = asmEl ? asmEl.textContent.trim() : '';
+    const regs = regsEl ? regsEl.textContent.trim() : '';
+    const comment = commentEl ? commentEl.textContent.replace(/^;\s*/, '').trim() : '';
+
+    const menu = document.createElement('div');
+    menu.className = 'ctx-menu';
+
+    function addItem(label, text) {
+      const div = document.createElement('div');
+      div.className = 'ctx-menu-item';
+      div.textContent = label;
+      div.addEventListener('click', () => {
+        navigator.clipboard.writeText(text).catch(() => {});
+        closeCtxMenu();
+      });
+      menu.appendChild(div);
+    }
+    function addSep() {
+      const div = document.createElement('div');
+      div.className = 'ctx-menu-sep';
+      menu.appendChild(div);
+    }
+
+    addItem('复制整行', '#' + idx + ' ' + pc + ' ' + asm + ' ' + regs + (comment ? ' ; ' + comment : ''));
+    addSep();
+    addItem('复制行号  #' + idx, idx);
+    addItem('复制地址  ' + pc, pc);
+    addItem('复制指令  ' + (asm.length > 30 ? asm.substring(0, 30) + '...' : asm), asm);
+    if (regs) addItem('复制寄存器  ' + (regs.length > 25 ? regs.substring(0, 25) + '...' : regs), regs);
+    if (comment) addItem('复制注释  ' + (comment.length > 25 ? comment.substring(0, 25) + '...' : comment), comment);
+    addSep();
+    const commentItem = document.createElement('div');
+    commentItem.className = 'ctx-menu-item';
+    commentItem.textContent = '; 添加/编辑注释';
+    commentItem.addEventListener('click', () => {
+      closeCtxMenu();
+      showCommentDialog(parseInt(idx));
+    });
+    menu.appendChild(commentItem);
+
+    // 定位
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+    document.body.appendChild(menu);
+    // 防止超出屏幕
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 4) + 'px';
+    if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 4) + 'px';
+    ctxMenu = menu;
+  });
 }
 
 async function refreshInfo() {
@@ -784,10 +878,15 @@ async function refreshInfo() {
 }
 
 function updatePagerUI() {
-  document.getElementById('pageInfo').textContent =
-    (currentPage + 1) + ' / ' + totalPages + ' 页';
-  document.getElementById('btnFirst').disabled = currentPage <= 0;
-  document.getElementById('btnPrev').disabled = currentPage <= 0;
+  if (minPageInView === currentPage) {
+    document.getElementById('pageInfo').textContent =
+      (currentPage + 1) + ' / ' + totalPages + ' 页';
+  } else {
+    document.getElementById('pageInfo').textContent =
+      (minPageInView + 1) + '-' + (currentPage + 1) + ' / ' + totalPages + ' 页';
+  }
+  document.getElementById('btnFirst').disabled = minPageInView <= 0;
+  document.getElementById('btnPrev').disabled = minPageInView <= 0;
   document.getElementById('btnNext').disabled = currentPage >= totalPages - 1;
   document.getElementById('btnLast').disabled = currentPage >= totalPages - 1;
 }
@@ -817,7 +916,7 @@ async function loadPage(page, mode) {
     renderPage(mode);
     updatePagerUI();
     document.getElementById('statusBar').textContent =
-      '第 ' + (page + 1) + ' 页，行 ' + offset + '-' + (offset + pageItems.length - 1) +
+      '行 ' + (minPageInView * PAGE_SIZE) + '-' + (offset + pageItems.length - 1) +
       '，共 ' + totalRecords.toLocaleString() + ' 条';
   } catch(e) {
     document.getElementById('statusBar').textContent = '加载失败';
@@ -843,6 +942,11 @@ async function loadPagePrepend(page) {
     container.insertAdjacentHTML('afterbegin', html);
     // 保持滚动位置不跳
     container.scrollTop += container.scrollHeight - prevHeight;
+    // 更新页码显示
+    updatePagerUI();
+    document.getElementById('statusBar').textContent =
+      '行 ' + (minPageInView * PAGE_SIZE) + '-' + (currentPage * PAGE_SIZE + pageItems.length - 1) +
+      '，共 ' + totalRecords.toLocaleString() + ' 条';
   } catch(e) {}
   loading = false;
 }
@@ -1502,6 +1606,27 @@ function refreshBookmarkList() {
   }
 }
 
+function refreshCommentList() {
+  const sel = document.getElementById('commentList');
+  sel.innerHTML = '<option value="">-- 注释 (' + Object.keys(comments).length + ') --</option>';
+  const keys = Object.keys(comments).map(Number).sort((a,b) => a - b);
+  for (const k of keys) {
+    const opt = document.createElement('option');
+    opt.value = k;
+    const text = comments[k].length > 30 ? comments[k].substring(0, 30) + '...' : comments[k];
+    opt.textContent = '#' + k + ' - ' + text;
+    sel.appendChild(opt);
+  }
+}
+
+document.getElementById('commentList').addEventListener('change', async (e) => {
+  const idx = parseInt(e.target.value);
+  if (!isNaN(idx)) {
+    await jumpToInstr(idx);
+    e.target.selectedIndex = 0;
+  }
+});
+
 document.getElementById('btnAddBookmark').addEventListener('click', () => {
   if (selectedIdx < 0) return;
   const note = prompt('书签备注 (指令 #' + selectedIdx + '):', bookmarks[selectedIdx] || '');
@@ -1509,15 +1634,23 @@ document.getElementById('btnAddBookmark').addEventListener('click', () => {
   if (note === '') { delete bookmarks[selectedIdx]; }
   else { bookmarks[selectedIdx] = note; }
   saveBookmarks();
-  // 刷新当前页显示书签图标
-  if (pageItems.length) renderPage('keep');
+  // 只更新对应行的书签图标，不重渲染整个页面
+  const row = container.querySelector('[data-idx="' + selectedIdx + '"]');
+  if (row) {
+    const bmEl = row.querySelector('.bm-icon');
+    if (bmEl) bmEl.textContent = bookmarks[selectedIdx] ? '📌' : '';
+  }
 });
 
 document.getElementById('btnDelBookmark').addEventListener('click', () => {
   if (selectedIdx < 0 || !bookmarks[selectedIdx]) return;
   delete bookmarks[selectedIdx];
   saveBookmarks();
-  if (pageItems.length) renderPage('keep');
+  const row = container.querySelector('[data-idx="' + selectedIdx + '"]');
+  if (row) {
+    const bmEl = row.querySelector('.bm-icon');
+    if (bmEl) bmEl.textContent = '';
+  }
 });
 
 document.getElementById('bookmarkList').addEventListener('change', async (e) => {
@@ -1528,6 +1661,7 @@ document.getElementById('bookmarkList').addEventListener('change', async (e) => 
 });
 
 refreshBookmarkList();
+refreshCommentList();
 
 // ==================== 监控点 ====================
 let wpPollTimer = null;
