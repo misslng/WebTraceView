@@ -1386,8 +1386,30 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, ins
 		io.ReadFull(br, hdr)
 		base := binary.LittleEndian.Uint64(hdr[:8])
 		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
-		cLo, cHi := base, base+uint64(dataLen)
-		if cLo < wHi && cHi > wLo {
+
+		// 计算实际访问的中心区域（去掉两侧各 128 字节窗口）
+		centerStart := dataLen / 2
+		accessSize := dataLen - 256
+		if accessSize < 1 {
+			accessSize = 1
+		}
+		halfAccess := accessSize / 2
+		if halfAccess < 2 {
+			halfAccess = 2
+		}
+		centerLoOff := centerStart - halfAccess
+		centerHiOff := centerStart + halfAccess
+		if centerLoOff < 0 {
+			centerLoOff = 0
+		}
+		if centerHiOff > dataLen {
+			centerHiOff = dataLen
+		}
+		// 实际访问的绝对地址范围
+		accessLo := base + uint64(centerLoOff)
+		accessHi := base + uint64(centerHiOff)
+
+		if accessLo < wHi && accessHi > wLo {
 			// 命中：读取数据提取 string 预览
 			data := make([]byte, dataLen)
 			io.ReadFull(br, data)
