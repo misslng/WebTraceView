@@ -111,6 +111,12 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .mem-tag.rw { color: #dcdcaa; background: #3a3a1e; }
 .sr-type.read { color: #4ec9b0; }
 .sr-type.write { color: #ce9178; }
+.sr-str { color: #6a9955; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; flex-shrink: 1; }
+.result-filter { display: flex; gap: 6px; padding: 3px 8px; background: #1a1a2e; border-bottom: 1px solid #2a2a2a; align-items: center; }
+.result-filter input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 6px; font-size: 11px; font-family: inherit; border-radius: 3px; width: 160px; }
+.result-filter button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.result-filter button:hover { background: #505050; }
+.result-filter span { font-size: 10px; color: #808080; }
 /* 书签 */
 .bookmark-bar { display: flex; gap: 6px; padding: 4px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; align-items: center; }
 .bookmark-bar button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
@@ -121,6 +127,21 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .diff-bar { display: none; }
 /* 寄存器追踪 */
 .reg-trace-canvas { width: 100%; height: 120px; border-bottom: 1px solid #404040; background: #1a1a2e; }
+/* 导航历史 */
+.nav-btn { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.nav-btn:hover:not(:disabled) { background: #505050; }
+.nav-btn:disabled { opacity: 0.4; cursor: default; }
+/* 注释 */
+.instr-row .comment-text { color: #6a9955; font-style: italic; font-size: 10px; margin-left: 8px; flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; }
+.comment-input-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.comment-input-box { background: #1e1e1e; border: 1px solid #555; border-radius: 6px; padding: 16px; width: 400px; }
+.comment-input-box h3 { font-size: 13px; color: #569cd6; margin-bottom: 8px; }
+.comment-input-box input { width: 100%; background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 6px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; }
+.comment-input-box .btn-row { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+.comment-input-box button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 4px 12px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
+.comment-input-box button:hover { background: #505050; }
+.comment-input-box button.primary { background: #0e639c; border-color: #1177bb; }
+.comment-input-box button.primary:hover { background: #1177bb; }
 </style>
 </head>
 <body>
@@ -136,6 +157,9 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   </div>
   <input type="text" id="gotoBox" placeholder="跳转行号..." style="width:100px">
   <input type="text" id="gotoPage" placeholder="跳转页码..." style="width:100px">
+  <span style="color:#555">│</span>
+  <button class="nav-btn" id="btnNavBack" title="后退 (Alt+Left)" disabled>⬅</button>
+  <button class="nav-btn" id="btnNavForward" title="前进 (Alt+Right)" disabled>➡</button>
 </div>
 <div class="main">
   <div class="instr-panel">
@@ -198,7 +222,14 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <div class="result-section-header" onclick="toggleSection('secWpResults')">
         <span class="rs-arrow">▼</span><span class="rs-label">📍 监控点结果</span><span class="rs-badge" id="wpBadge">0</span>
       </div>
-      <div class="result-section-body" id="wpResults"></div>
+      <div class="result-section-body">
+        <div class="result-filter">
+          <input type="text" id="wpFilterInput" placeholder="过滤: 指令/string/地址...">
+          <button id="wpFilterAll" title="从所有结果中搜索">搜全部</button>
+          <span id="wpFilterInfo"></span>
+        </div>
+        <div id="wpResults"></div>
+      </div>
     </div>
     <div class="result-section" id="secRegTrace" style="display:none">
       <div class="result-section-header" onclick="toggleSection('secRegTrace')">
@@ -224,7 +255,14 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       <div class="result-section-header" onclick="toggleSection('secSearchResults')">
         <span class="rs-arrow">▼</span><span class="rs-label">🔍 全局内存搜索结果</span><span class="rs-badge" id="memSearchBadge">0</span>
       </div>
-      <div class="result-section-body" id="searchResults"></div>
+      <div class="result-section-body">
+        <div class="result-filter">
+          <input type="text" id="memFilterInput" placeholder="过滤: 指令/string/地址...">
+          <button id="memFilterAll" title="从所有结果中搜索">搜全部</button>
+          <span id="memFilterInfo"></span>
+        </div>
+        <div id="searchResults"></div>
+      </div>
     </div>
     <div class="mem-container" id="memContainer">
       <div class="loading">点击左侧任意指令查看该时刻的内存状态</div>
@@ -260,6 +298,95 @@ let minPageInView = 0;
 let hlAddr = -1, hlSize = 0;  // 高亮范围
 let lastRegions = null;       // 缓存当前显示的 regions
 
+// ==================== 导航历史 ====================
+let navHistory = [];
+let navHistoryPos = -1;
+let navJumping = false; // 防止导航时重复 push
+
+function navPush(idx) {
+  if (navJumping) return;
+  // 如果当前不在栈顶，截断后面的
+  if (navHistoryPos < navHistory.length - 1) {
+    navHistory = navHistory.slice(0, navHistoryPos + 1);
+  }
+  // 避免连续重复
+  if (navHistory.length > 0 && navHistory[navHistory.length - 1] === idx) return;
+  navHistory.push(idx);
+  if (navHistory.length > 200) navHistory = navHistory.slice(-200);
+  navHistoryPos = navHistory.length - 1;
+  updateNavButtons();
+}
+
+function navBack() {
+  if (navHistoryPos <= 0) return;
+  navHistoryPos--;
+  navJumping = true;
+  jumpToInstr(navHistory[navHistoryPos]).then(() => { navJumping = false; updateNavButtons(); });
+}
+
+function navForward() {
+  if (navHistoryPos >= navHistory.length - 1) return;
+  navHistoryPos++;
+  navJumping = true;
+  jumpToInstr(navHistory[navHistoryPos]).then(() => { navJumping = false; updateNavButtons(); });
+}
+
+function updateNavButtons() {
+  document.getElementById('btnNavBack').disabled = navHistoryPos <= 0;
+  document.getElementById('btnNavForward').disabled = navHistoryPos >= navHistory.length - 1;
+}
+
+// ==================== 指令注释系统 ====================
+const comments = {};
+
+function saveComments() {
+  localStorage.setItem('wtv_comments', JSON.stringify(comments));
+  saveSession();
+}
+
+function loadCommentsFromStorage() {
+  try {
+    const data = JSON.parse(localStorage.getItem('wtv_comments') || '{}');
+    for (const k of Object.keys(data)) comments[k] = data[k];
+  } catch(e) {}
+}
+
+function showCommentDialog(idx) {
+  const existing = comments[idx] || '';
+  // 创建弹窗
+  const overlay = document.createElement('div');
+  overlay.className = 'comment-input-overlay';
+  overlay.innerHTML = '<div class="comment-input-box">'
+    + '<h3>注释 - 指令 #' + idx + '</h3>'
+    + '<input type="text" id="commentInput" placeholder="输入注释（留空删除）..." value="' + escHtml(existing) + '">'
+    + '<div class="btn-row"><button id="commentCancel">取消</button><button id="commentOk" class="primary">确定</button></div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  const input = document.getElementById('commentInput');
+  input.focus();
+  input.select();
+
+  function close() { overlay.remove(); }
+  function confirm() {
+    const val = input.value.trim();
+    if (val) { comments[idx] = val; }
+    else { delete comments[idx]; }
+    saveComments();
+    if (pageItems.length) renderPage();
+    close();
+  }
+
+  document.getElementById('commentCancel').addEventListener('click', close);
+  document.getElementById('commentOk').addEventListener('click', confirm);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') confirm();
+    if (e.key === 'Escape') close();
+  });
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+}
+
+loadCommentsFromStorage();
+
 const container = document.getElementById('instrContainer');
 
 // ==================== 云端会话持久化 ====================
@@ -276,6 +403,7 @@ function collectSession() {
     hlSizeInput: document.getElementById('hlSize').value,
     bookmarks: typeof bookmarks !== 'undefined' ? bookmarks : {},
     funcNames: typeof funcNames !== 'undefined' ? funcNames : {},
+    comments: typeof comments !== 'undefined' ? comments : {},
     // 搜索词
     instrSearchKeyword: document.getElementById('instrSearchInput').value,
     globalSearchPattern: document.getElementById('searchPattern').value,
@@ -344,6 +472,14 @@ async function restoreSession(session) {
       funcNames[k] = session.funcNames[k];
     }
     saveFuncNamesQuiet();
+  }
+
+  // 恢复注释
+  if (session.comments && typeof session.comments === 'object') {
+    for (const k of Object.keys(session.comments)) {
+      comments[k] = session.comments[k];
+    }
+    localStorage.setItem('wtv_comments', JSON.stringify(comments));
   }
 
   // 恢复输入框
@@ -562,6 +698,38 @@ async function init() {
     const data = collectSession();
     navigator.sendBeacon('/api/session', JSON.stringify(data));
   });
+
+  // 导航按钮
+  document.getElementById('btnNavBack').addEventListener('click', navBack);
+  document.getElementById('btnNavForward').addEventListener('click', navForward);
+
+  // 全局快捷键
+  document.addEventListener('keydown', e => {
+    // Alt+Left: 后退
+    if (e.altKey && e.key === 'ArrowLeft') { e.preventDefault(); navBack(); return; }
+    // Alt+Right: 前进
+    if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navForward(); return; }
+
+    // 不在输入框中时才响应单键快捷键
+    const tag = document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+    // ; 添加注释
+    if (e.key === ';' && selectedIdx >= 0) {
+      e.preventDefault();
+      showCommentDialog(selectedIdx);
+      return;
+    }
+  });
+
+  // 双击指令行添加注释
+  container.addEventListener('dblclick', e => {
+    const row = e.target.closest('.instr-row');
+    if (row) {
+      e.preventDefault();
+      showCommentDialog(parseInt(row.dataset.idx));
+    }
+  });
 }
 
 async function refreshInfo() {
@@ -681,6 +849,7 @@ function renderInstrRow(item, sel) {
     + '<span class="asm' + asmClass + '">' + marker + escHtml(item.instrText) + fnLabel + '</span>'
     + memTag
     + '<span class="regs">' + escHtml(item.regText) + '</span>'
+    + (comments[item.index] ? '<span class="comment-text">; ' + escHtml(comments[item.index]) + '</span>' : '')
     + '</div>';
 }
 
@@ -690,6 +859,7 @@ function renderPage(mode) {
     const sel = item.index === selectedIdx ? ' selected' : '';
     html += renderInstrRow(item, sel);
   }
+
   if (mode === 'append') {
     container.insertAdjacentHTML('beforeend', html);
   } else {
@@ -868,6 +1038,7 @@ async function pollInstrSearchResults() {
 }
 
 async function jumpToInstr(idx) {
+  navPush(idx);
   const page = Math.floor(idx / PAGE_SIZE);
   await gotoPage(page);
   const row = container.querySelector('[data-idx="' + idx + '"]');
@@ -902,15 +1073,22 @@ function updateBadge(badgeId, count) {
 
 // ==================== 通用分页结果管理器 ====================
 function PagedResults(opts) {
-  // opts: { el, pageSize, renderRow, onClickRow, fetchUrl }
+  // opts: { el, pageSize, renderRow, onClickRow, fetchUrl, filterInputId, filterInfoId, filterBtnId }
   this.el = opts.el;
   this.pageSize = opts.pageSize || 50;
   this.renderRow = opts.renderRow;
   this.onClickRow = opts.onClickRow;
   this.fetchUrl = opts.fetchUrl;
+  this.filterInputId = opts.filterInputId || null;
+  this.filterInfoId = opts.filterInfoId || null;
+  this.filterBtnId = opts.filterBtnId || null;
+  this.filterText = '';
   this.page = 0;
   this.totalMatches = 0;
   this.lastDone = false;
+  this.lastMatches = []; // 缓存当前页原始数据
+  this.allMatches = null; // 搜全部模式下的全量数据
+  this.allFilterPage = 0; // 全量过滤结果的当前页
 
   // 创建 DOM 结构
   this.listEl = document.createElement('div');
@@ -926,7 +1104,154 @@ function PagedResults(opts) {
     const row = e.target.closest('.search-result-row');
     if (row && this.onClickRow) this.onClickRow(row);
   });
+
+  // 绑定过滤输入框
+  if (this.filterInputId) {
+    const self = this;
+    document.getElementById(this.filterInputId).addEventListener('input', function() {
+      self.filterText = this.value.trim().toLowerCase();
+      if (self.allMatches) {
+        // 全量模式下实时过滤
+        self.allFilterPage = 0;
+        self.renderAllFiltered();
+      } else {
+        self.applyFilter();
+      }
+    });
+    // 回车也触发搜全部
+    document.getElementById(this.filterInputId).addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        self.filterText = this.value.trim().toLowerCase();
+        self.searchAll();
+      }
+    });
+  }
+  // 绑定搜全部按钮
+  if (this.filterBtnId) {
+    const self = this;
+    document.getElementById(this.filterBtnId).addEventListener('click', function() {
+      self.filterText = document.getElementById(self.filterInputId).value.trim().toLowerCase();
+      self.searchAll();
+    });
+  }
 }
+
+PagedResults.prototype.applyFilter = function() {
+  if (!this.lastMatches.length) return;
+  const q = this.filterText;
+  if (!q) {
+    // 无过滤，全部显示
+    let html = '';
+    for (const m of this.lastMatches) html += this.renderRow(m);
+    this.listEl.innerHTML = html;
+    if (this.filterInfoId) document.getElementById(this.filterInfoId).textContent = '';
+    return;
+  }
+  let html = '';
+  let shown = 0;
+  for (const m of this.lastMatches) {
+    const haystack = ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+    if (haystack.includes(q)) {
+      html += this.renderRow(m);
+      shown++;
+    }
+  }
+  if (shown === 0) {
+    this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">过滤后无匹配</div>';
+  } else {
+    this.listEl.innerHTML = html;
+  }
+  if (this.filterInfoId) {
+    document.getElementById(this.filterInfoId).textContent = shown + '/' + this.lastMatches.length;
+  }
+};
+
+// 搜全部：一次性拉取所有结果，客户端过滤
+PagedResults.prototype.searchAll = async function() {
+  if (!this.filterText) return;
+  const infoEl = this.filterInfoId ? document.getElementById(this.filterInfoId) : null;
+  if (infoEl) infoEl.textContent = '正在加载全部结果...';
+
+  // 如果还没拉过全量数据，或者数据量变了，重新拉
+  if (!this.allMatches || this.allMatches.length < this.totalMatches) {
+    try {
+      // 分批拉取，每批 5000
+      this.allMatches = [];
+      const batchSize = 5000;
+      let offset = 0;
+      while (offset < this.totalMatches) {
+        const data = await fetchJSON(this.fetchUrl + '&offset=' + offset + '&limit=' + batchSize);
+        const batch = data.matches || [];
+        if (batch.length === 0) break;
+        this.allMatches = this.allMatches.concat(batch);
+        offset += batch.length;
+        if (infoEl) infoEl.textContent = '加载中 ' + this.allMatches.length + '/' + this.totalMatches + '...';
+      }
+    } catch(e) {
+      if (infoEl) infoEl.textContent = '加载失败';
+      return;
+    }
+  }
+
+  this.allFilterPage = 0;
+  this.renderAllFiltered();
+};
+
+// 在全量数据上过滤并分页显示
+PagedResults.prototype.renderAllFiltered = function() {
+  if (!this.allMatches) return;
+  const q = this.filterText;
+  const infoEl = this.filterInfoId ? document.getElementById(this.filterInfoId) : null;
+
+  // 过滤
+  let filtered;
+  if (q) {
+    filtered = this.allMatches.filter(m => {
+      const haystack = ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+      return haystack.includes(q);
+    });
+  } else {
+    filtered = this.allMatches;
+  }
+
+  if (filtered.length === 0) {
+    this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">全部结果中无匹配</div>';
+    this.pagerEl.style.display = 'none';
+    if (infoEl) infoEl.textContent = '0/' + this.allMatches.length + ' (全量)';
+    return;
+  }
+
+  // 分页
+  const pageSize = this.pageSize;
+  const totalPages = Math.ceil(filtered.length / pageSize);
+  if (this.allFilterPage >= totalPages) this.allFilterPage = totalPages - 1;
+  const start = this.allFilterPage * pageSize;
+  const slice = filtered.slice(start, start + pageSize);
+
+  let html = '';
+  for (const m of slice) html += this.renderRow(m);
+  this.listEl.innerHTML = html;
+
+  if (infoEl) infoEl.textContent = '命中 ' + filtered.length + '/' + this.allMatches.length + ' (全量搜索)';
+
+  // 分页器
+  if (totalPages <= 1) {
+    this.pagerEl.style.display = 'none';
+  } else {
+    this.pagerEl.style.display = '';
+    this.pagerEl.innerHTML =
+      '<button class="pr-prev">◀</button>' +
+      '<span>' + (this.allFilterPage + 1) + ' / ' + totalPages + ' (' + filtered.length + ' 条)</span>' +
+      '<button class="pr-next">▶</button>';
+    const prev = this.pagerEl.querySelector('.pr-prev');
+    const next = this.pagerEl.querySelector('.pr-next');
+    prev.disabled = this.allFilterPage <= 0;
+    next.disabled = this.allFilterPage >= totalPages - 1;
+    const self = this;
+    prev.onclick = () => { if (self.allFilterPage > 0) { self.allFilterPage--; self.renderAllFiltered(); } };
+    next.onclick = () => { if (self.allFilterPage < totalPages - 1) { self.allFilterPage++; self.renderAllFiltered(); } };
+  }
+};
 
 PagedResults.prototype.update = function(totalMatches, done) {
   this.totalMatches = totalMatches;
@@ -960,15 +1285,20 @@ PagedResults.prototype.loadPage = async function(page) {
   try {
     const data = await fetchJSON(this.fetchUrl + '&offset=' + off + '&limit=' + this.pageSize);
     const matches = data.matches || [];
+    this.lastMatches = matches;
     if (matches.length === 0) {
       this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">暂无匹配</div>';
       return;
     }
-    let html = '';
-    for (const m of matches) {
-      html += this.renderRow(m);
+    if (this.filterText) {
+      this.applyFilter();
+    } else {
+      let html = '';
+      for (const m of matches) {
+        html += this.renderRow(m);
+      }
+      this.listEl.innerHTML = html;
     }
-    this.listEl.innerHTML = html;
   } catch(e) {
     this.listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">加载失败</div>';
   }
@@ -977,8 +1307,16 @@ PagedResults.prototype.loadPage = async function(page) {
 PagedResults.prototype.reset = function() {
   this.page = 0;
   this.totalMatches = 0;
+  this.lastMatches = [];
+  this.allMatches = null;
+  this.allFilterPage = 0;
   this.listEl.innerHTML = '';
   this.pagerEl.style.display = 'none';
+  if (this.filterInputId) {
+    document.getElementById(this.filterInputId).value = '';
+    this.filterText = '';
+  }
+  if (this.filterInfoId) document.getElementById(this.filterInfoId).textContent = '';
 };
 
 // ==================== 全局内存搜索 ====================
@@ -989,14 +1327,19 @@ const memSearchPR = new PagedResults({
   el: document.getElementById('searchResults'),
   pageSize: 50,
   fetchUrl: '/api/search/results?_=1',
+  filterInputId: 'memFilterInput',
+  filterInfoId: 'memFilterInfo',
+  filterBtnId: 'memFilterAll',
   renderRow: (m) => {
     const tc = m.type === 'write' ? 'write' : 'read';
     const tl = m.type === 'write' ? 'W' : 'R';
+    const strPreview = m.dataPreview ? '<span class="sr-str" title="' + escHtml(m.dataPreview) + '">"' + escHtml(m.dataPreview) + '"</span>' : '';
     return '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.chunkBase + '" data-plen="' + m.patternLen + '">'
       + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
       + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
       + '<span class="sr-addr">' + m.chunkBase + '</span>'
-      + '<span class="sr-type ' + tc + '">[' + tl + ']</span></div>';
+      + '<span class="sr-type ' + tc + '">[' + tl + ']</span>'
+      + strPreview + '</div>';
   },
   onClickRow: (row) => {
     jumpToSearchResult(parseInt(row.dataset.idx), row.dataset.addr, parseInt(row.dataset.plen) || 1);
@@ -1130,13 +1473,18 @@ const wpPR = new PagedResults({
   el: document.getElementById('wpResults'),
   pageSize: 50,
   fetchUrl: '/api/watchpoint/results?_=1',
+  filterInputId: 'wpFilterInput',
+  filterInfoId: 'wpFilterInfo',
+  filterBtnId: 'wpFilterAll',
   renderRow: (m) => {
     const tc = m.type === 'write' ? 'write' : 'read';
+    const strPreview = m.dataPreview ? '<span class="sr-str" title="' + escHtml(m.dataPreview) + '">"' + escHtml(m.dataPreview) + '"</span>' : '';
     return '<div class="search-result-row" data-idx="' + m.index + '">'
       + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
       + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
       + '<span class="sr-addr">' + m.chunkBase + '</span>'
-      + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span></div>';
+      + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span>'
+      + strPreview + '</div>';
   },
   onClickRow: (row) => { jumpToInstr(parseInt(row.dataset.idx)); }
 });
