@@ -117,6 +117,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .result-filter button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 .result-filter button:hover { background: #505050; }
 .result-filter span { font-size: 10px; color: #808080; }
+.filter-select { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 /* 书签 */
 .bookmark-bar { display: flex; gap: 6px; padding: 4px 8px; background: #2d2d2d; border-bottom: 1px solid #404040; align-items: center; }
 .bookmark-bar button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
@@ -224,7 +225,13 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       </div>
       <div class="result-section-body">
         <div class="result-filter">
-          <input type="text" id="wpFilterInput" placeholder="过滤: 指令/string/地址...">
+          <select id="wpFilterType" class="filter-select">
+            <option value="all">全部</option>
+            <option value="instr">指令</option>
+            <option value="addr">地址</option>
+            <option value="string">String</option>
+          </select>
+          <input type="text" id="wpFilterInput" placeholder="过滤...">
           <button id="wpFilterAll" title="从所有结果中搜索">搜全部</button>
           <span id="wpFilterInfo"></span>
         </div>
@@ -257,7 +264,13 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
       </div>
       <div class="result-section-body">
         <div class="result-filter">
-          <input type="text" id="memFilterInput" placeholder="过滤: 指令/string/地址...">
+          <select id="memFilterType" class="filter-select">
+            <option value="all">全部</option>
+            <option value="instr">指令</option>
+            <option value="addr">地址</option>
+            <option value="string">String</option>
+          </select>
+          <input type="text" id="memFilterInput" placeholder="过滤...">
           <button id="memFilterAll" title="从所有结果中搜索">搜全部</button>
           <span id="memFilterInfo"></span>
         </div>
@@ -1075,7 +1088,7 @@ function updateBadge(badgeId, count) {
 
 // ==================== 通用分页结果管理器 ====================
 function PagedResults(opts) {
-  // opts: { el, pageSize, renderRow, onClickRow, fetchUrl, filterInputId, filterInfoId, filterBtnId }
+  // opts: { el, pageSize, renderRow, onClickRow, fetchUrl, filterInputId, filterInfoId, filterBtnId, filterSelectId }
   this.el = opts.el;
   this.pageSize = opts.pageSize || 50;
   this.renderRow = opts.renderRow;
@@ -1084,7 +1097,9 @@ function PagedResults(opts) {
   this.filterInputId = opts.filterInputId || null;
   this.filterInfoId = opts.filterInfoId || null;
   this.filterBtnId = opts.filterBtnId || null;
+  this.filterSelectId = opts.filterSelectId || null;
   this.filterText = '';
+  this.filterType = 'all';
   this.page = 0;
   this.totalMatches = 0;
   this.lastDone = false;
@@ -1136,7 +1151,29 @@ function PagedResults(opts) {
       self.searchAll();
     });
   }
+  // 绑定过滤类型下拉框
+  if (this.filterSelectId) {
+    const self = this;
+    document.getElementById(this.filterSelectId).addEventListener('change', function() {
+      self.filterType = this.value;
+      if (self.allMatches) {
+        self.allFilterPage = 0;
+        self.renderAllFiltered();
+      } else {
+        self.applyFilter();
+      }
+    });
+  }
 }
+
+PagedResults.prototype.getHaystack = function(m) {
+  const t = this.filterType;
+  if (t === 'instr') return (m.instrText || '').toLowerCase();
+  if (t === 'addr') return ((m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+  if (t === 'string') return (m.dataPreview || '').toLowerCase();
+  // all
+  return ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+};
 
 PagedResults.prototype.applyFilter = function() {
   if (!this.lastMatches.length) return;
@@ -1152,7 +1189,7 @@ PagedResults.prototype.applyFilter = function() {
   let html = '';
   let shown = 0;
   for (const m of this.lastMatches) {
-    const haystack = ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+    const haystack = this.getHaystack(m);
     if (haystack.includes(q)) {
       html += this.renderRow(m);
       shown++;
@@ -1209,7 +1246,7 @@ PagedResults.prototype.renderAllFiltered = function() {
   let filtered;
   if (q) {
     filtered = this.allMatches.filter(m => {
-      const haystack = ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+      const haystack = this.getHaystack(m);
       return haystack.includes(q);
     });
   } else {
@@ -1319,6 +1356,10 @@ PagedResults.prototype.reset = function() {
     this.filterText = '';
   }
   if (this.filterInfoId) document.getElementById(this.filterInfoId).textContent = '';
+  if (this.filterSelectId) {
+    document.getElementById(this.filterSelectId).value = 'all';
+    this.filterType = 'all';
+  }
 };
 
 // ==================== 全局内存搜索 ====================
@@ -1332,6 +1373,7 @@ const memSearchPR = new PagedResults({
   filterInputId: 'memFilterInput',
   filterInfoId: 'memFilterInfo',
   filterBtnId: 'memFilterAll',
+  filterSelectId: 'memFilterType',
   renderRow: (m) => {
     const tc = m.type === 'write' ? 'write' : 'read';
     const tl = m.type === 'write' ? 'W' : 'R';
@@ -1478,6 +1520,7 @@ const wpPR = new PagedResults({
   filterInputId: 'wpFilterInput',
   filterInfoId: 'wpFilterInfo',
   filterBtnId: 'wpFilterAll',
+  filterSelectId: 'wpFilterType',
   renderRow: (m) => {
     const tc = m.type === 'write' ? 'write' : 'read';
     const strPreview = m.dataPreview ? '<span class="sr-str" title="' + escHtml(m.dataPreview) + '">"' + escHtml(m.dataPreview) + '"</span>' : '';
