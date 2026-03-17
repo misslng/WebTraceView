@@ -236,16 +236,14 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   <span id="indexStatus"></span>
 </div>
 
-<div class="modal-overlay" id="timelineModal" style="display:none">
-  <div class="modal-box">
-    <div class="modal-header">
-      <h2>📊 函数调用流程</h2>
-      <input type="text" id="tlSearch" placeholder="搜索地址/函数名..." style="background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:3px 6px;font-size:11px;font-family:inherit;border-radius:3px;width:180px">
-      <span id="tlInfo" style="font-size:11px;color:#808080"></span>
-      <button id="tlClose">✕ 关闭</button>
-    </div>
-    <div class="modal-body" id="tlBody" style="overflow-y:auto;padding:8px;font-size:11px;font-family:monospace"></div>
+<div id="timelineFloat" style="display:none;position:fixed;right:20px;top:60px;width:500px;height:400px;z-index:999;background:#1e1e1e;border:1px solid #555;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.5);display:none;flex-direction:column;resize:both;overflow:hidden">
+  <div id="tlDragBar" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#2d2d2d;border-bottom:1px solid #404040;border-radius:6px 6px 0 0;cursor:move;user-select:none;flex-shrink:0">
+    <span style="font-size:12px;color:#569cd6;flex:1">📊 函数调用流程</span>
+    <input type="text" id="tlSearch" placeholder="搜索..." style="background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:2px 6px;font-size:10px;font-family:inherit;border-radius:3px;width:120px">
+    <span id="tlInfo" style="font-size:10px;color:#808080"></span>
+    <button id="tlClose" style="background:none;border:none;color:#808080;cursor:pointer;font-size:14px;padding:0 4px">✕</button>
   </div>
+  <div id="tlBody" style="flex:1;overflow:hidden;font-size:11px;font-family:monospace"></div>
 </div>
 
 <script>
@@ -1258,9 +1256,9 @@ let cfLoaded = false;
 let cfLoading = false;
 
 document.getElementById('btnCallTimeline').addEventListener('click', async () => {
-  const modal = document.getElementById('timelineModal');
-  if (modal.style.display !== 'none') { modal.style.display = 'none'; return; }
-  modal.style.display = '';
+  const panel = document.getElementById('timelineFloat');
+  if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
+  panel.style.display = 'flex';
   if (cfLoaded) { initVirtualScroll(); return; }
   document.getElementById('tlBody').innerHTML = '<div style="padding:20px;color:#808080">加载中...</div>';
   try {
@@ -1312,17 +1310,33 @@ function loadMoreIfNeeded() {
 }
 
 document.getElementById('tlClose').addEventListener('click', () => {
-  document.getElementById('timelineModal').style.display = 'none';
+  document.getElementById('timelineFloat').style.display = 'none';
 });
-document.getElementById('timelineModal').addEventListener('click', (e) => {
-  if (e.target === document.getElementById('timelineModal'))
-    document.getElementById('timelineModal').style.display = 'none';
-});
+
+// 拖拽悬浮窗
+(function() {
+  const panel = document.getElementById('timelineFloat');
+  const bar = document.getElementById('tlDragBar');
+  let dragging = false, dx = 0, dy = 0;
+  bar.addEventListener('mousedown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+    dragging = true;
+    dx = e.clientX - panel.offsetLeft;
+    dy = e.clientY - panel.offsetTop;
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    panel.style.left = (e.clientX - dx) + 'px';
+    panel.style.top = (e.clientY - dy) + 'px';
+    panel.style.right = 'auto';
+  });
+  window.addEventListener('mouseup', () => { dragging = false; });
+})();
 
 document.getElementById('tlBody').addEventListener('click', (e) => {
   const line = e.target.closest('.cf-line');
   if (line && line.dataset.idx) {
-    document.getElementById('timelineModal').style.display = 'none';
     jumpToInstr(parseInt(line.dataset.idx));
   }
 });
