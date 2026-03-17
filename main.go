@@ -112,13 +112,14 @@ var db *TraceDB
 // ==================== 全局搜索 ====================
 
 type SearchMatch struct {
-	Index      int    `json:"index"`
-	PC         string `json:"pc"`
-	InstrText  string `json:"instrText"`
-	ChunkBase  string `json:"chunkBase"`
-	MatchOff   int    `json:"matchOffset"`
-	ChunkType  string `json:"type"` // "read" or "write"
-	PatternLen int    `json:"patternLen"`
+	Index       int    `json:"index"`
+	PC          string `json:"pc"`
+	InstrText   string `json:"instrText"`
+	ChunkBase   string `json:"chunkBase"`
+	MatchOff    int    `json:"matchOffset"`
+	ChunkType   string `json:"type"` // "read" or "write"
+	PatternLen  int    `json:"patternLen"`
+	DataPreview string `json:"dataPreview"`
 }
 
 type SearchJob struct {
@@ -975,15 +976,23 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 			// 匹配范围和中心区域有交集才算命中
 			if matchStart < centerHi && matchEnd > centerLo {
 				matchAddr := base + uint64(matchStart)
+				// 提取匹配位置附近的 string 预览
+				previewStart := matchStart
+				previewEnd := matchStart + 64
+				if previewEnd > dataLen {
+					previewEnd = dataLen
+				}
+				preview := extractStringPreview(data[previewStart:previewEnd], 64)
 				job.mu.Lock()
 				job.matches = append(job.matches, SearchMatch{
-					Index:      idx,
-					PC:         fmt.Sprintf("0x%x", pc),
-					InstrText:  instrText,
-					ChunkBase:  fmt.Sprintf("0x%x", matchAddr),
-					MatchOff:   matchStart,
-					ChunkType:  chunkType,
-					PatternLen: len(job.pattern),
+					Index:       idx,
+					PC:          fmt.Sprintf("0x%x", pc),
+					InstrText:   instrText,
+					ChunkBase:   fmt.Sprintf("0x%x", matchAddr),
+					MatchOff:    matchStart,
+					ChunkType:   chunkType,
+					PatternLen:  len(job.pattern),
+					DataPreview: preview,
 				})
 				job.mu.Unlock()
 			}
@@ -1198,17 +1207,41 @@ func skipChunkGroupBufio(br *bufio.Reader) {
 
 // ==================== Watchpoint ====================
 
+// extractStringPreview 从字节数据中提取可打印字符串预览（最多 maxLen 字节）
+func extractStringPreview(data []byte, maxLen int) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if len(data) > maxLen {
+		data = data[:maxLen]
+	}
+	var sb strings.Builder
+	for _, b := range data {
+		if b >= 32 && b < 127 {
+			sb.WriteByte(b)
+		} else if b == 0 {
+			if sb.Len() > 0 {
+				break // null terminator
+			}
+		} else {
+			sb.WriteByte('.')
+		}
+	}
+	return sb.String()
+}
+
 var (
 	wpJob   *WatchpointJob
 	wpJobMu sync.Mutex
 )
 
 type WatchpointMatch struct {
-	Index     int    `json:"index"`
-	PC        string `json:"pc"`
-	InstrText string `json:"instrText"`
-	ChunkBase string `json:"chunkBase"`
-	ChunkType string `json:"type"`
+	Index       int    `json:"index"`
+	PC          string `json:"pc"`
+	InstrText   string `json:"instrText"`
+	ChunkBase   string `json:"chunkBase"`
+	ChunkType   string `json:"type"`
+	DataPreview string `json:"dataPreview"`
 }
 
 type WatchpointJob struct {
@@ -1353,15 +1386,36 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, ins
 		io.ReadFull(br, hdr)
 		base := binary.LittleEndian.Uint64(hdr[:8])
 		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
-		io.CopyN(io.Discard, br, int64(dataLen))
 		cLo, cHi := base, base+uint64(dataLen)
 		if cLo < wHi && cHi > wLo {
+			// 命中：读取数据提取 string 预览
+			data := make([]byte, dataLen)
+			io.ReadFull(br, data)
+			// 提取监控范围内的字节
+			previewStart := 0
+			previewEnd := dataLen
+			if wLo > base {
+				previewStart = int(wLo - base)
+			}
+			if wHi < base+uint64(dataLen) {
+				previewEnd = int(wHi - base)
+			}
+			if previewStart < 0 {
+				previewStart = 0
+			}
+			if previewEnd > dataLen {
+				previewEnd = dataLen
+			}
+			preview := extractStringPreview(data[previewStart:previewEnd], 64)
 			job.mu.Lock()
 			job.matches = append(job.matches, WatchpointMatch{
 				Index: idx, PC: fmt.Sprintf("0x%x", pc), InstrText: instrText,
 				ChunkBase: fmt.Sprintf("0x%x", base), ChunkType: chunkType,
+				DataPreview: preview,
 			})
 			job.mu.Unlock()
+		} else {
+			io.CopyN(io.Discard, br, int64(dataLen))
 		}
 	}
 }
