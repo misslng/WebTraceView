@@ -374,11 +374,20 @@ let navJumping = false; // 防止导航时重复 push
 
 // ==================== 云端笔记 ====================
 let _notesSaveTimer = null;
+let _lastNotesRect = {}; // 缓存最后一次有效的尺寸/位置
 
 function toggleNotes() {
   const el = document.getElementById('notesFloat');
   const isOpen = el.classList.contains('open');
   if (isOpen) {
+    // 关闭前缓存当前尺寸/位置
+    _lastNotesRect = {
+      left: el.style.left || '',
+      top: el.style.top || '',
+      right: el.style.right || '',
+      width: el.offsetWidth,
+      height: el.offsetHeight,
+    };
     el.classList.remove('open');
   } else {
     el.classList.add('open');
@@ -585,13 +594,18 @@ function collectSession() {
     notesOpen: document.getElementById('notesFloat').classList.contains('open'),
     notesRect: (function() {
       const el = document.getElementById('notesFloat');
-      return {
-        left: el.style.left || '',
-        top: el.style.top || '',
-        right: el.style.right || '',
-        width: el.offsetWidth,
-        height: el.offsetHeight,
-      };
+      const isOpen = el.classList.contains('open');
+      if (isOpen && el.offsetWidth > 0) {
+        return {
+          left: el.style.left || '',
+          top: el.style.top || '',
+          right: el.style.right || '',
+          width: el.offsetWidth,
+          height: el.offsetHeight,
+        };
+      }
+      // 隐藏状态用缓存值
+      return _lastNotesRect;
     })(),
   };
 }
