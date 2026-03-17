@@ -941,25 +941,50 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 			return
 		}
 
-		// 搜索所有匹配位置
+		// 实际访问的中心区域：去掉两侧各 128 字节的窗口
+		centerStart := dataLen / 2
+		accessSize := dataLen - 256
+		if accessSize < 1 {
+			accessSize = 1
+		}
+		halfAccess := accessSize / 2
+		if halfAccess < 2 {
+			halfAccess = 2
+		}
+		centerLo := centerStart - halfAccess
+		centerHi := centerStart + halfAccess
+		if centerLo < 0 {
+			centerLo = 0
+		}
+		if centerHi > dataLen {
+			centerHi = dataLen
+		}
+
+		// 搜索所有匹配位置，只保留与中心区域有交集的
 		off := 0
 		for {
 			pos := bytes.Index(data[off:], job.pattern)
 			if pos < 0 {
 				break
 			}
-			matchAddr := base + uint64(off+pos)
-			job.mu.Lock()
-			job.matches = append(job.matches, SearchMatch{
-				Index:      idx,
-				PC:         fmt.Sprintf("0x%x", pc),
-				InstrText:  instrText,
-				ChunkBase:  fmt.Sprintf("0x%x", matchAddr),
-				MatchOff:   off + pos,
-				ChunkType:  chunkType,
-				PatternLen: len(job.pattern),
-			})
-			job.mu.Unlock()
+			matchStart := off + pos
+			matchEnd := matchStart + len(job.pattern)
+
+			// 匹配范围和中心区域有交集才算命中
+			if matchStart < centerHi && matchEnd > centerLo {
+				matchAddr := base + uint64(matchStart)
+				job.mu.Lock()
+				job.matches = append(job.matches, SearchMatch{
+					Index:      idx,
+					PC:         fmt.Sprintf("0x%x", pc),
+					InstrText:  instrText,
+					ChunkBase:  fmt.Sprintf("0x%x", matchAddr),
+					MatchOff:   matchStart,
+					ChunkType:  chunkType,
+					PatternLen: len(job.pattern),
+				})
+				job.mu.Unlock()
+			}
 			off += pos + len(job.pattern)
 		}
 	}
