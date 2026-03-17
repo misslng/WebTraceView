@@ -573,9 +573,12 @@ function renderHexDump(baseStr, hexStr, regionType) {
   const bytesPerLine = 16;
   const totalBytes = hexStr.length / 2;
   const maxBytes = Math.min(totalBytes, 1024);
-  // 实际访问的地址在 chunk 中心
-  const accessLo = base + Math.floor(totalBytes / 2) - 4;
-  const accessHi = base + Math.floor(totalBytes / 2) + 4;
+  // 实际访问的地址在 chunk 中心，大小 = totalBytes - 256 (两侧各128的窗口)
+  const center = base + Math.floor(totalBytes / 2);
+  const accessSize = Math.max(1, totalBytes - 256);
+  const halfAccess = Math.max(2, Math.floor(accessSize / 2));
+  const accessLo = center - halfAccess;
+  const accessHi = center + halfAccess;
   const activeCls = regionType === 'write' ? 'active-write' : 'active-read';
   let html = '';
   for (let off = 0; off < maxBytes; off += bytesPerLine) {
