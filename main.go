@@ -925,29 +925,39 @@ func runSearch(ctx context.Context, job *SearchJob) {
 
 	log.Printf("搜索: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
 
+	// 每个 worker 收集局部结果，最后按 segment 顺序合并
+	localResults := make([][]SearchMatch, len(segments))
 	var wg sync.WaitGroup
-	for _, seg := range segments {
+	for i, seg := range segments {
 		wg.Add(1)
-		go func(seg segment) {
+		go func(i int, seg segment) {
 			defer wg.Done()
-			runSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
-		}(seg)
+			localResults[i] = runSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(i, seg)
 	}
 	wg.Wait()
+
+	// 按 segment 顺序合并
+	job.mu.Lock()
+	for _, local := range localResults {
+		job.matches = append(job.matches, local...)
+	}
+	job.mu.Unlock()
 }
 
 const SEARCH_MATCH_LIMIT = 500000
 
-func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, startIdx, endIdx int) {
+func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, startIdx, endIdx int) []SearchMatch {
+	var local []SearchMatch
 	f, err := os.Open(db.path)
 	if err != nil {
 		log.Printf("搜索: 打开文件失败: %v", err)
-		return
+		return local
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(fileOffset, 0); err != nil {
-		return
+		return local
 	}
 
 	br := bufio.NewReaderSize(f, 8*1024*1024)
@@ -960,16 +970,16 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 	for idx < endIdx {
 		select {
 		case <-ctx.Done():
-			return
+			return local
 		default:
 		}
 
 		// 读 magic + pc + instrLen (14 bytes)
 		if _, err := io.ReadFull(br, hdr); err != nil {
-			return
+			return local
 		}
 		if string(hdr[:4]) != "UTRA" {
-			return
+			return local
 		}
 		pc := binary.LittleEndian.Uint64(hdr[4:12])
 		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
@@ -981,51 +991,49 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 			instrBuf = instrBuf[:instrLen]
 		}
 		if _, err := io.ReadFull(br, instrBuf); err != nil {
-			return
+			return local
 		}
 
 		// 跳 regText
 		var regLen uint16
 		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
-			return
+			return local
 		}
 		if _, err := io.CopyN(io.Discard, br, int64(regLen)); err != nil {
-			return
+			return local
 		}
 
 		// 读 readChunks 并搜索
-		searchChunkGroup(br, job, idx, pc, string(instrBuf), "read")
+		local = searchChunkGroup(br, job, idx, pc, string(instrBuf), "read", local)
 		// 读 writeChunks 并搜索
-		searchChunkGroup(br, job, idx, pc, string(instrBuf), "write")
+		local = searchChunkGroup(br, job, idx, pc, string(instrBuf), "write", local)
 
 		idx++
 		job.scanned.Add(1)
 
 		// 匹配数上限
-		job.mu.Lock()
-		n := len(job.matches)
-		job.mu.Unlock()
-		if n >= SEARCH_MATCH_LIMIT {
-			return
+		if len(local) >= SEARCH_MATCH_LIMIT {
+			return local
 		}
 	}
+	return local
 }
 
-func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, instrText string, chunkType string) {
+func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, instrText string, chunkType string, local []SearchMatch) []SearchMatch {
 	var cnt uint32
 	if err := binary.Read(br, binary.LittleEndian, &cnt); err != nil {
-		return
+		return local
 	}
 	hdr := make([]byte, 12)
 	for i := uint32(0); i < cnt; i++ {
 		if _, err := io.ReadFull(br, hdr); err != nil {
-			return
+			return local
 		}
 		base := binary.LittleEndian.Uint64(hdr[:8])
 		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
 		data := make([]byte, dataLen)
 		if _, err := io.ReadFull(br, data); err != nil {
-			return
+			return local
 		}
 
 		// 实际访问的中心区域：去掉两侧各 128 字节的窗口
@@ -1067,8 +1075,7 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 					previewEnd = dataLen
 				}
 				preview := extractStringPreview(data[previewStart:previewEnd], 64)
-				job.mu.Lock()
-				job.matches = append(job.matches, SearchMatch{
+				local = append(local, SearchMatch{
 					Index:       idx,
 					PC:          fmt.Sprintf("0x%x", pc),
 					InstrText:   instrText,
@@ -1078,11 +1085,11 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 					PatternLen:  len(job.pattern),
 					DataPreview: preview,
 				})
-				job.mu.Unlock()
 			}
 			off += pos + len(job.pattern)
 		}
 	}
+	return local
 }
 
 // ==================== 指令搜索 ====================
@@ -1249,26 +1256,34 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 
 	log.Printf("指令搜索: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
 
+	localResults := make([][]InstrSearchMatch, len(segments))
 	var wg sync.WaitGroup
-	for _, seg := range segments {
+	for i, seg := range segments {
 		wg.Add(1)
-		go func(seg segment) {
+		go func(i int, seg segment) {
 			defer wg.Done()
-			runInstrSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
-		}(seg)
+			localResults[i] = runInstrSearchSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(i, seg)
 	}
 	wg.Wait()
+
+	job.mu.Lock()
+	for _, local := range localResults {
+		job.matches = append(job.matches, local...)
+	}
+	job.mu.Unlock()
 }
 
-func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset int64, startIdx, endIdx int) {
+func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset int64, startIdx, endIdx int) []InstrSearchMatch {
+	var local []InstrSearchMatch
 	f, err := os.Open(db.path)
 	if err != nil {
-		return
+		return local
 	}
 	defer f.Close()
 
 	if _, err := f.Seek(fileOffset, 0); err != nil {
-		return
+		return local
 	}
 
 	br := bufio.NewReaderSize(f, 8*1024*1024)
@@ -1280,15 +1295,15 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 	for idx < endIdx {
 		select {
 		case <-ctx.Done():
-			return
+			return local
 		default:
 		}
 
 		if _, err := io.ReadFull(br, hdr); err != nil {
-			return
+			return local
 		}
 		if string(hdr[:4]) != "UTRA" {
-			return
+			return local
 		}
 
 		pc := binary.LittleEndian.Uint64(hdr[4:12])
@@ -1300,12 +1315,12 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			instrBuf = instrBuf[:instrLen]
 		}
 		if _, err := io.ReadFull(br, instrBuf); err != nil {
-			return
+			return local
 		}
 
 		var regLen uint16
 		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
-			return
+			return local
 		}
 		if cap(regBuf) < int(regLen) {
 			regBuf = make([]byte, regLen, int(regLen)*2)
@@ -1313,7 +1328,7 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			regBuf = regBuf[:regLen]
 		}
 		if _, err := io.ReadFull(br, regBuf); err != nil {
-			return
+			return local
 		}
 
 		// 跳 chunks
@@ -1333,23 +1348,19 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			}
 			db.depthMu.RUnlock()
 
-			job.mu.Lock()
-			job.matches = append(job.matches, InstrSearchMatch{
+			local = append(local, InstrSearchMatch{
 				Index: idx, PC: pcStr, Instr: instrText, Regs: regText, Depth: depth,
 			})
-			job.mu.Unlock()
 		}
 
 		idx++
 		job.scanned.Add(1)
 
-		job.mu.Lock()
-		n := len(job.matches)
-		job.mu.Unlock()
-		if n >= SEARCH_MATCH_LIMIT {
-			return
+		if len(local) >= SEARCH_MATCH_LIMIT {
+			return local
 		}
 	}
+	return local
 }
 
 func skipChunkGroupBufio(br *bufio.Reader) {
@@ -1553,25 +1564,33 @@ func runWatchpoint(ctx context.Context, job *WatchpointJob) {
 
 	log.Printf("Watchpoint: 启动 %d 个并行 worker, 总记录 %d", len(segments), totalRecs)
 
+	localResults := make([][]WatchpointMatch, len(segments))
 	var wg sync.WaitGroup
-	for _, seg := range segments {
+	for i, seg := range segments {
 		wg.Add(1)
-		go func(seg segment) {
+		go func(i int, seg segment) {
 			defer wg.Done()
-			runWatchpointSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
-		}(seg)
+			localResults[i] = runWatchpointSegment(ctx, job, seg.offset, seg.startIdx, seg.endIdx)
+		}(i, seg)
 	}
 	wg.Wait()
+
+	job.mu.Lock()
+	for _, local := range localResults {
+		job.matches = append(job.matches, local...)
+	}
+	job.mu.Unlock()
 }
 
-func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset int64, startIdx, endIdx int) {
+func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset int64, startIdx, endIdx int) []WatchpointMatch {
+	var local []WatchpointMatch
 	f, err := os.Open(db.path)
 	if err != nil {
-		return
+		return local
 	}
 	defer f.Close()
 	if _, err := f.Seek(fileOffset, 0); err != nil {
-		return
+		return local
 	}
 	br := bufio.NewReaderSize(f, 8*1024*1024)
 	hdr := make([]byte, 14)
@@ -1581,14 +1600,14 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 	for idx < endIdx {
 		select {
 		case <-ctx.Done():
-			return
+			return local
 		default:
 		}
 		if _, err := io.ReadFull(br, hdr); err != nil {
-			return
+			return local
 		}
 		if string(hdr[:4]) != "UTRA" {
-			return
+			return local
 		}
 		pc := binary.LittleEndian.Uint64(hdr[4:12])
 		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
@@ -1598,21 +1617,19 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		binary.Read(br, binary.LittleEndian, &regLen)
 		io.CopyN(io.Discard, br, int64(regLen))
 
-		wpCheckChunks(br, job, idx, pc, string(instrBuf), "read", wLo, wHi)
-		wpCheckChunks(br, job, idx, pc, string(instrBuf), "write", wLo, wHi)
+		local = wpCheckChunks(br, job, idx, pc, string(instrBuf), "read", wLo, wHi, local)
+		local = wpCheckChunks(br, job, idx, pc, string(instrBuf), "write", wLo, wHi, local)
 
 		idx++
 		job.scanned.Add(1)
-		job.mu.Lock()
-		n := len(job.matches)
-		job.mu.Unlock()
-		if n >= SEARCH_MATCH_LIMIT {
-			return
+		if len(local) >= SEARCH_MATCH_LIMIT {
+			return local
 		}
 	}
+	return local
 }
 
-func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, instrText, chunkType string, wLo, wHi uint64) {
+func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, instrText, chunkType string, wLo, wHi uint64, local []WatchpointMatch) []WatchpointMatch {
 	var cnt uint32
 	binary.Read(br, binary.LittleEndian, &cnt)
 	hdr := make([]byte, 12)
@@ -1663,17 +1680,16 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, ins
 				previewEnd = dataLen
 			}
 			preview := extractStringPreview(data[previewStart:previewEnd], 64)
-			job.mu.Lock()
-			job.matches = append(job.matches, WatchpointMatch{
+			local = append(local, WatchpointMatch{
 				Index: idx, PC: fmt.Sprintf("0x%x", pc), InstrText: instrText,
 				ChunkBase: fmt.Sprintf("0x%x", base), ChunkType: chunkType,
 				DataPreview: preview,
 			})
-			job.mu.Unlock()
 		} else {
 			io.CopyN(io.Discard, br, int64(dataLen))
 		}
 	}
+	return local
 }
 
 // ==================== 寄存器追踪 ====================

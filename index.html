@@ -235,6 +235,25 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
           <button id="wpFilterAll" title="从所有结果中搜索">搜全部</button>
           <span id="wpFilterInfo"></span>
         </div>
+        <div class="result-filter wp-traceback">
+          <span style="font-size:11px;color:#569cd6">⏪ 回溯</span>
+          <input type="text" id="wpTraceIdx" placeholder="行号" style="width:80px">
+          <select id="wpTraceType" class="filter-select">
+            <option value="write">仅写入[W]</option>
+            <option value="read">仅读取[R]</option>
+            <option value="all">全部</option>
+          </select>
+          <button id="btnWpTrace">查找</button>
+          <span id="wpTraceInfo"></span>
+        </div>
+        <div id="wpTraceResults" style="display:none">
+          <div class="wp-trace-header" style="padding:3px 8px;background:#1a2a1a;border-bottom:1px solid #2a3a2a;display:flex;align-items:center;gap:6px">
+            <span id="wpTraceTitle" style="font-size:11px;color:#6a9955;flex:1"></span>
+            <button id="btnWpTraceClose" style="background:none;border:none;color:#808080;cursor:pointer;font-size:12px;padding:0 4px">✕</button>
+          </div>
+          <div id="wpTraceList" style="max-height:180px;overflow-y:auto"></div>
+          <div id="wpTracePager" class="results-pager" style="display:none"></div>
+        </div>
         <div id="wpResults"></div>
       </div>
     </div>
@@ -1574,6 +1593,125 @@ async function pollWpResults() {
     }
   } catch(e) {}
 }
+
+// ==================== 监控点回溯 ====================
+(function() {
+  const tracePageSize = 50;
+  let traceResults = [];
+  let tracePage = 0;
+
+  document.getElementById('btnWpTrace').addEventListener('click', doWpTrace);
+  document.getElementById('wpTraceIdx').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doWpTrace();
+  });
+  document.getElementById('btnWpTraceClose').addEventListener('click', function() {
+    document.getElementById('wpTraceResults').style.display = 'none';
+  });
+
+  async function doWpTrace() {
+    const idxStr = document.getElementById('wpTraceIdx').value.trim();
+    const targetIdx = parseInt(idxStr);
+    const infoEl = document.getElementById('wpTraceInfo');
+    if (isNaN(targetIdx) || targetIdx < 0) {
+      infoEl.textContent = '请输入有效行号';
+      return;
+    }
+    const typeFilter = document.getElementById('wpTraceType').value;
+
+    // 确保有全量数据
+    infoEl.textContent = '加载全量数据...';
+    let allData = wpPR.allMatches;
+    if (!allData || allData.length < wpPR.totalMatches) {
+      // 拉取全量
+      allData = [];
+      const batchSize = 5000;
+      let offset = 0;
+      while (true) {
+        try {
+          const data = await fetchJSON('/api/watchpoint/results?_=1&offset=' + offset + '&limit=' + batchSize);
+          const batch = data.matches || [];
+          if (batch.length === 0) break;
+          allData = allData.concat(batch);
+          offset += batch.length;
+          infoEl.textContent = '加载中 ' + allData.length + '/' + wpPR.totalMatches + '...';
+        } catch(e) {
+          infoEl.textContent = '加载失败';
+          return;
+        }
+      }
+      wpPR.allMatches = allData;
+    }
+
+    // 从全量数据中筛选 index < targetIdx 的记录，按 index 倒序
+    traceResults = allData.filter(m => {
+      if (m.index >= targetIdx) return false;
+      if (typeFilter === 'write') return m.type === 'write';
+      if (typeFilter === 'read') return m.type === 'read';
+      return true;
+    });
+    traceResults.sort((a, b) => b.index - a.index);
+
+    tracePage = 0;
+    infoEl.textContent = '找到 ' + traceResults.length + ' 条 (行号 < #' + targetIdx + ')';
+    document.getElementById('wpTraceTitle').textContent =
+      '⏪ #' + targetIdx + ' 之前的' + (typeFilter === 'write' ? '写入' : typeFilter === 'read' ? '读取' : '访问') +
+      '记录 (' + traceResults.length + ' 条)';
+    document.getElementById('wpTraceResults').style.display = '';
+    renderTracePage();
+  }
+
+  function renderTracePage() {
+    const listEl = document.getElementById('wpTraceList');
+    const pagerEl = document.getElementById('wpTracePager');
+    if (traceResults.length === 0) {
+      listEl.innerHTML = '<div style="padding:6px;color:#808080;font-size:11px">无匹配记录</div>';
+      pagerEl.style.display = 'none';
+      return;
+    }
+    const totalPages = Math.ceil(traceResults.length / tracePageSize);
+    if (tracePage >= totalPages) tracePage = totalPages - 1;
+    const start = tracePage * tracePageSize;
+    const slice = traceResults.slice(start, start + tracePageSize);
+
+    let html = '';
+    for (let i = 0; i < slice.length; i++) {
+      const m = slice[i];
+      const rank = start + i + 1;
+      const tc = m.type === 'write' ? 'write' : 'read';
+      const strPreview = m.dataPreview ? '<span class="sr-str" title="' + escHtml(m.dataPreview) + '">"' + escHtml(m.dataPreview) + '"</span>' : '';
+      html += '<div class="search-result-row" data-idx="' + m.index + '">'
+        + '<span class="sr-idx" style="color:#6a9955">' + rank + '.</span>'
+        + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
+        + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
+        + '<span class="sr-addr">' + m.chunkBase + '</span>'
+        + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span>'
+        + strPreview + '</div>';
+    }
+    listEl.innerHTML = html;
+
+    if (totalPages <= 1) {
+      pagerEl.style.display = 'none';
+    } else {
+      pagerEl.style.display = 'flex';
+      pagerEl.innerHTML =
+        '<button class="pr-prev">◀</button>' +
+        '<span>' + (tracePage + 1) + ' / ' + totalPages + ' (' + traceResults.length + ' 条)</span>' +
+        '<button class="pr-next">▶</button>';
+      pagerEl.querySelector('.pr-prev').onclick = function() {
+        if (tracePage > 0) { tracePage--; renderTracePage(); }
+      };
+      pagerEl.querySelector('.pr-next').onclick = function() {
+        if (tracePage < totalPages - 1) { tracePage++; renderTracePage(); }
+      };
+    }
+  }
+
+  // 点击回溯结果行跳转
+  document.getElementById('wpTraceList').addEventListener('click', function(e) {
+    const row = e.target.closest('.search-result-row');
+    if (row) jumpToInstr(parseInt(row.dataset.idx));
+  });
+})();
 
 // ==================== 寄存器追踪 ====================
 let regPollTimer = null;
