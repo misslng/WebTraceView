@@ -56,6 +56,14 @@ type TraceDB struct {
 	funcMap map[uint64]*FuncEntry
 	funcMu  sync.RWMutex
 
+	// 函数调用时间线（bl/ret 事件）
+	funcEvents   []FuncEvent
+	funcEventsMu sync.RWMutex
+
+	// 调用树缓存
+	callFlowLines []CallFlowLine
+	callFlowBuilt atomic.Bool
+
 	pool sync.Pool
 }
 
@@ -64,6 +72,21 @@ type FuncEntry struct {
 	FirstCall   int
 	TotalInstr  int
 	lastCallIdx int
+}
+
+type FuncEvent struct {
+	Index int    `json:"index"`
+	PC    uint64 `json:"pc"`
+	Depth int16  `json:"depth"`
+	Type  byte   `json:"type"` // 'C' = call, 'R' = ret
+}
+
+type CallFlowLine struct {
+	Type  string `json:"type"` // "call" or "ret"
+	PC    string `json:"pc"`
+	Depth int    `json:"depth"`
+	From  int    `json:"from"`
+	To    int    `json:"to"`
 }
 
 func (db *TraceDB) getFile() *os.File {
@@ -143,6 +166,7 @@ func main() {
 	http.HandleFunc("/api/search/reg", handleSearchReg)
 	http.HandleFunc("/api/search/reg/results", handleSearchRegResults)
 	http.HandleFunc("/api/functions", handleFunctions)
+	http.HandleFunc("/api/calltree", handleCallTimeline)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -213,6 +237,10 @@ func (db *TraceDB) buildIndexAsync() {
 					retStack = retStack[:i]
 					callDepth = int16(i)
 					matched = true
+					// 记录 ret 事件
+					db.funcEventsMu.Lock()
+					db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth, Type: 'R'})
+					db.funcEventsMu.Unlock()
 					break
 				}
 			}
@@ -263,6 +291,10 @@ func (db *TraceDB) buildIndexAsync() {
 			retStack = append(retStack, pc+4)
 			callDepth++
 			pendingCallIdx = count
+			// 记录 call 事件
+			db.funcEventsMu.Lock()
+			db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth, Type: 'C'})
+			db.funcEventsMu.Unlock()
 		}
 
 		// 跳 regText
@@ -1540,6 +1572,110 @@ func handleFunctions(w http.ResponseWriter, r *http.Request) {
 		"functions": funcs,
 		"total":     len(funcs),
 	})
+}
+
+// ==================== 函数调用时间线 ====================
+
+func handleCallTimeline(w http.ResponseWriter, r *http.Request) {
+	if !db.indexDone.Load() {
+		http.Error(w, "索引未完成", 503)
+		return
+	}
+
+	// 首次请求时构建缓存
+	if !db.callFlowBuilt.Load() {
+		buildCallFlowLines()
+	}
+
+	// 分页参数
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	total := len(db.callFlowLines)
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+
+	var slice []CallFlowLine
+	if offset < total {
+		slice = db.callFlowLines[offset:end]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"lines": slice,
+		"total": total,
+	})
+}
+
+func buildCallFlowLines() {
+	db.funcEventsMu.RLock()
+	events := db.funcEvents
+	db.funcEventsMu.RUnlock()
+
+	total := int(db.totalRecs.Load())
+
+	type StackEntry struct {
+		index int
+		pc    uint64
+		depth int16
+	}
+	stack := make([]StackEntry, 0, 256)
+	lines := make([]CallFlowLine, 0, len(events)*2+1)
+
+	// 根函数
+	firstPC := uint64(0)
+	fileOff := db.seekToRecord(0)
+	if fileOff >= 0 {
+		f := db.getFile()
+		if f != nil {
+			info, err := readInstrAt(f, fileOff)
+			if err == nil {
+				firstPC = info.PC
+			}
+			db.putFile(f)
+		}
+	}
+	lines = append(lines, CallFlowLine{
+		Type: "call", PC: fmt.Sprintf("0x%x", firstPC), Depth: 0, From: 0, To: total,
+	})
+
+	for _, ev := range events {
+		if ev.Type == 'C' {
+			stack = append(stack, StackEntry{index: ev.Index, pc: ev.PC, depth: ev.Depth})
+			lines = append(lines, CallFlowLine{
+				Type: "call", PC: fmt.Sprintf("0x%x", ev.PC), Depth: int(ev.Depth), From: ev.Index, To: 0,
+			})
+		} else if ev.Type == 'R' {
+			if len(stack) > 0 {
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				// call 行补上 To
+				// ret 行的 idx 指向返回后的下一条指令
+				lines = append(lines, CallFlowLine{
+					Type: "ret", PC: fmt.Sprintf("0x%x", top.pc), Depth: int(top.depth), From: top.index, To: ev.Index + 1,
+				})
+			}
+		}
+	}
+	// 栈里剩余的
+	for i := len(stack) - 1; i >= 0; i-- {
+		s := stack[i]
+		lines = append(lines, CallFlowLine{
+			Type: "ret", PC: fmt.Sprintf("0x%x", s.pc), Depth: int(s.depth), From: s.index, To: total,
+		})
+	}
+
+	db.callFlowLines = lines
+	db.callFlowBuilt.Store(true)
+	log.Printf("调用流程缓存已构建，共 %d 行", len(lines))
 }
 
 func handleFrontend(w http.ResponseWriter, r *http.Request) {
