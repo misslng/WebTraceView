@@ -107,8 +107,8 @@ func setupMCP() http.Handler {
   - index: int, 命中指令的全局行号
   - pc: string, 命中指令的 PC 地址（含符号名）
   - instrText: string, 命中指令的 ARM 汇编文本
-  - chunkBase: string, 匹配数据所在的内存地址（hex），可直接传给 get_memory 的 highlight_addr
-  - matchOffset: int, 匹配位置在该内存 chunk 原始数据中的字节偏移
+  - chunkBase: string, 匹配数据的精确内存地址（hex），即 chunk 起始地址 + 匹配偏移。可直接传给 get_memory 的 highlight_addr
+  - matchOffset: int, 匹配位置在该内存 chunk 原始数据中的字节偏移（chunkBase 已经包含了此偏移，highlight 时直接用 chunkBase 即可）
   - type: string, "read" 或 "write"，表示匹配数据是在读操作还是写操作中发现的
   - patternLen: int, 搜索模式的字节长度，可传给 get_memory 的 highlight_size
   - dataPreview: string, 匹配位置附近的可打印字符串预览（最多 64 字节）`),
@@ -157,7 +157,7 @@ func setupMCP() http.Handler {
   - index: int, 访问该地址的指令的全局行号
   - pc: string, 指令的 PC 地址（含符号名）
   - instrText: string, 指令的 ARM 汇编文本
-  - chunkBase: string, 包含监控地址的内存 chunk 起始地址（hex）
+  - chunkBase: string, 包含监控地址的内存 chunk 窗口起始地址（hex），注意这是窗口起始地址（比实际访问地址小约 128 字节），不是精确匹配地址。高亮时应使用 set_watchpoint 时传入的 addr 和 size，而非 chunkBase
   - type: string, "read" 或 "write"，表示该指令是读取还是写入了监控地址
   - dataPreview: string, 监控地址附近的数据预览`),
 		mcp.WithString("addr", mcp.Required(), mcp.Description("监控地址，hex 格式如 0x40001000")),
@@ -180,7 +180,7 @@ func setupMCP() http.Handler {
   - index: int, 指令的全局行号
   - pc: string, 指令的 PC 地址（含符号名）
   - instrText: string, 指令的 ARM 汇编文本
-  - chunkBase: string, 包含监控地址的内存 chunk 起始地址（hex）
+  - chunkBase: string, 包含监控地址的内存 chunk 窗口起始地址（hex），高亮时应使用 set_watchpoint 时传入的 addr
   - type: string, "read" 或 "write"
   - dataPreview: string, 数据预览`),
 		mcp.WithNumber("before_index", mcp.Required(), mcp.Description("目标行号，只返回行号小于此值的记录")),
