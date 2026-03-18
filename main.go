@@ -60,6 +60,10 @@ type TraceDB struct {
 	tidSet   []int32
 	tidSetMu sync.RWMutex
 
+	// 每个 tid 对应的记录索引列表（预建索引，加速过滤）
+	tidIndex   map[int32][]int
+	tidIndexMu sync.RWMutex
+
 	// 函数摘要
 	funcMap map[uint64]*FuncEntry
 	funcMu  sync.RWMutex
@@ -393,21 +397,24 @@ func (db *TraceDB) buildIndexAsync() {
 	}
 	db.depthMu.Unlock()
 
-	// 收集所有出现过的 tid
-	tidSeen := make(map[int32]bool)
+	// 收集所有出现过的 tid，同时构建 tid -> []recordIndex 索引
+	tidIdx := make(map[int32][]int)
 	db.tidMu.RLock()
-	for _, t := range db.tids {
-		tidSeen[t] = true
+	for i, t := range db.tids {
+		tidIdx[t] = append(tidIdx[t], i)
 	}
 	db.tidMu.RUnlock()
-	tidList := make([]int32, 0, len(tidSeen))
-	for t := range tidSeen {
+	tidList := make([]int32, 0, len(tidIdx))
+	for t := range tidIdx {
 		tidList = append(tidList, t)
 	}
 	sort.Slice(tidList, func(i, j int) bool { return tidList[i] < tidList[j] })
 	db.tidSetMu.Lock()
 	db.tidSet = tidList
 	db.tidSetMu.Unlock()
+	db.tidIndexMu.Lock()
+	db.tidIndex = tidIdx
+	db.tidIndexMu.Unlock()
 
 	log.Printf("索引完成: %d 条, %d 个锚点, %d 个线程, 耗时 %v", count, len(db.anchors), len(tidList), time.Since(t0))
 	log.Printf("调用层级: rawMin=%d, rawMax=%d, 归一化后 max=%d, final=%d",
@@ -725,19 +732,11 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 	total := int(db.totalRecs.Load())
 
 	if tidFilter >= 0 {
-		// tid 过滤模式：off/limit 是过滤后的逻辑偏移
-		// 先从 tids 数组中找出属于该 tid 的记录索引
-		db.tidMu.RLock()
-		allTids := db.tids
-		db.tidMu.RUnlock()
+		// tid 过滤模式：用预建索引直接查表
+		db.tidIndexMu.RLock()
+		matched := db.tidIndex[tidFilter]
+		db.tidIndexMu.RUnlock()
 
-		// 收集匹配的全局索引
-		var matched []int
-		for i, t := range allTids {
-			if t == tidFilter {
-				matched = append(matched, i)
-			}
-		}
 		filteredTotal := len(matched)
 		end := off + limit
 		if end > filteredTotal {
@@ -768,16 +767,32 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 			ThreadId int32  `json:"threadId"`
 		}
 
-		items := make([]Item, 0, end-off)
-		for _, globalIdx := range matched[off:end] {
-			fileOff := db.seekToRecord(globalIdx)
+		slice := matched[off:end]
+		items := make([]Item, 0, len(slice))
+		// 顺序读取优化：记录上一条的 NextOffset，如果下一条紧邻就复用
+		lastIdx := -1
+		lastNextOff := int64(-1)
+		for _, globalIdx := range slice {
+			var fileOff int64
+			if lastIdx >= 0 && globalIdx == lastIdx+1 && lastNextOff > 0 {
+				// 紧邻上一条，直接用上一条的 NextOffset
+				fileOff = lastNextOff
+			} else {
+				fileOff = db.seekToRecord(globalIdx)
+			}
 			if fileOff < 0 {
+				lastIdx = globalIdx
+				lastNextOff = -1
 				continue
 			}
 			info, err := readInstrAt(f, fileOff)
 			if err != nil {
+				lastIdx = globalIdx
+				lastNextOff = -1
 				continue
 			}
+			lastIdx = globalIdx
+			lastNextOff = info.NextOffset
 			depth := 0
 			db.depthMu.RLock()
 			if globalIdx < len(db.depths) {
