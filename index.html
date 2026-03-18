@@ -44,6 +44,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .instr-row { padding: 2px 8px; font-size: 12px; cursor: pointer; display: flex; white-space: nowrap; border-bottom: 1px solid #2a2a2a; height: 22px; line-height: 18px; align-items: center; }
 .instr-row:hover { background: #264f78; }
 .instr-row.selected { background: #094771; }
+.instr-row.multi-selected { background: #264f78; }
 .instr-row .idx { color: #858585; width: 70px; flex-shrink: 0; text-align: right; padding-right: 12px; }
 .instr-row .pc { color: #4ec9b0; width: 270px; flex-shrink: 0; }
 .instr-row .tid { color: #d19a66; width: 50px; flex-shrink: 0; font-size: 0.85em; opacity: 0.8; }
@@ -371,6 +372,7 @@ let currentPage = 0;
 let totalPages = 0;
 let pageItems = [];
 let selectedIdx = -1;
+let multiSelectedIdxs = new Set(); // 多选的行索引集合
 let loading = false;
 let pollTimer = null;
 let minPageInView = 0;
@@ -792,9 +794,38 @@ async function init() {
   });
 
   // 点击指令行
+  function clearMultiSelect() {
+    container.querySelectorAll('.instr-row.multi-selected').forEach(el => el.classList.remove('multi-selected'));
+    multiSelectedIdxs.clear();
+  }
+
   container.addEventListener('click', e => {
     const row = e.target.closest('.instr-row');
-    if (row) selectInstruction(parseInt(row.dataset.idx));
+    if (!row) return;
+    const idx = parseInt(row.dataset.idx);
+
+    if (e.shiftKey && selectedIdx >= 0) {
+      // Shift+点击：范围选
+      const allRows = Array.from(container.querySelectorAll('.instr-row'));
+      const idxList = allRows.map(r => parseInt(r.dataset.idx));
+      const fromPos = idxList.indexOf(selectedIdx);
+      const toPos = idxList.indexOf(idx);
+      if (fromPos >= 0 && toPos >= 0) {
+        const lo = Math.min(fromPos, toPos);
+        const hi = Math.max(fromPos, toPos);
+        clearMultiSelect();
+        for (let i = lo; i <= hi; i++) {
+          multiSelectedIdxs.add(idxList[i]);
+          allRows[i].classList.add('multi-selected');
+        }
+      }
+      // 阻止文本选中
+      window.getSelection()?.removeAllRanges();
+    } else {
+      // 普通点击：清除多选，选中单行
+      clearMultiSelect();
+      selectInstruction(idx);
+    }
   });
 
   // 跳转行号
@@ -1009,6 +1040,29 @@ async function init() {
     }
 
     addItem('复制整行', '#' + idx + ' ' + pc + ' ' + asm + ' ' + regs + (comment ? ' ; ' + comment : ''));
+
+    // 多选时：复制所有选中行
+    if (multiSelectedIdxs.size > 1) {
+      addSep();
+      const copyMultiItem = document.createElement('div');
+      copyMultiItem.className = 'ctx-menu-item';
+      copyMultiItem.textContent = '复制选中 ' + multiSelectedIdxs.size + ' 行';
+      copyMultiItem.addEventListener('click', () => {
+        const sortedIdxs = Array.from(multiSelectedIdxs).sort((a, b) => a - b);
+        const lines = sortedIdxs.map(i => {
+          const r = container.querySelector('[data-idx="' + i + '"]');
+          if (!r) return '#' + i;
+          const p = r.querySelector('.pc')?.textContent.trim() || '';
+          const a = r.querySelector('.asm')?.textContent.trim() || '';
+          const rg = r.querySelector('.regs')?.textContent.trim() || '';
+          const c = r.querySelector('.comment-text')?.textContent.replace(/^;\s*/, '').trim() || '';
+          return '#' + i + ' ' + p + ' ' + a + ' ' + rg + (c ? ' ; ' + c : '');
+        });
+        navigator.clipboard.writeText(lines.join('\n')).catch(() => {});
+        closeCtxMenu();
+      });
+      menu.appendChild(copyMultiItem);
+    }
     addSep();
     addItem('复制行号  #' + idx, idx);
     addItem('复制地址  ' + pc, pc);
