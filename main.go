@@ -633,7 +633,7 @@ func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
 	}
 
 	return &InstrInfo{
-		ThreadId: threadId, PC: pc, PCText: string(pcTextBuf), InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
+		ThreadId: threadId, PC: pc, PCText: fmt.Sprintf("(0x%x)%s", pc, string(pcTextBuf)), InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
 	}, nil
 }
 
@@ -1226,13 +1226,14 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
-		// hdr[4:8] = threadId (unused here), hdr[8:16] = pc (unused), hdr[16:18] = pcTextLen
+		// hdr[4:8] = threadId (unused here), hdr[8:16] = pc, hdr[16:18] = pcTextLen
+		pc := binary.LittleEndian.Uint64(hdr[8:16])
 		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
 		}
-		pcText := string(pcTextBuf)
+		pcText := fmt.Sprintf("(0x%x)%s", pc, string(pcTextBuf))
 
 		var instrLen16 uint16
 		if err := binary.Read(br, binary.LittleEndian, &instrLen16); err != nil {
@@ -1562,13 +1563,14 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			return local
 		}
 
-		// hdr[16:18] = pcTextLen
+		// hdr[8:16] = pc, hdr[16:18] = pcTextLen
+		pc := binary.LittleEndian.Uint64(hdr[8:16])
 		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
 		}
-		pcText := string(pcTextBuf)
+		pcText := fmt.Sprintf("(0x%x)%s", pc, string(pcTextBuf))
 
 		var instrLen16 uint16
 		if err := binary.Read(br, binary.LittleEndian, &instrLen16); err != nil {
@@ -1875,12 +1877,13 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
+		pc := binary.LittleEndian.Uint64(hdr[8:16])
 		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
 		}
-		pcText := string(pcTextBuf)
+		pcText := fmt.Sprintf("(0x%x)%s", pc, string(pcTextBuf))
 		var instrLen16 uint16
 		binary.Read(br, binary.LittleEndian, &instrLen16)
 		instrLen := int(instrLen16)
@@ -2119,13 +2122,15 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		if string(magic) != "UTRA" {
 			return
 		}
-		// skip threadId(4) + pc(8), read pcText
-		io.CopyN(io.Discard, br, 12)
+		// read threadId(4) + pc(8), then pcText
+		tidPcBuf := make([]byte, 12)
+		io.ReadFull(br, tidPcBuf)
+		pc := binary.LittleEndian.Uint64(tidPcBuf[4:12])
 		var pcTextLen uint16
 		binary.Read(br, binary.LittleEndian, &pcTextLen)
 		pcTextBuf := make([]byte, pcTextLen)
 		io.ReadFull(br, pcTextBuf)
-		pcText := string(pcTextBuf)
+		pcText := fmt.Sprintf("(0x%x)%s", pc, string(pcTextBuf))
 		var instrLen uint16
 		binary.Read(br, binary.LittleEndian, &instrLen)
 		instrBuf := make([]byte, instrLen)
