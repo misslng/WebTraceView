@@ -183,6 +183,7 @@ func main() {
 	http.HandleFunc("/api/calltree", handleCallTimeline)
 	http.HandleFunc("/api/session", handleSession)
 	http.HandleFunc("/api/tid", handleTid)
+	http.HandleFunc("/api/tid-position", handleTidPosition)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -728,6 +729,45 @@ func handleTid(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"tid": db.tids[idx]})
+}
+
+// handleTidPosition: 给定全局 index 和 tid，返回该 index 在 tid 过滤结果中的位置（第几条）
+func handleTidPosition(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.URL.Query().Get("index"))
+	if err != nil || idx < 0 {
+		http.Error(w, "invalid index", 400)
+		return
+	}
+	tidVal, err := strconv.Atoi(r.URL.Query().Get("tid"))
+	if err != nil {
+		http.Error(w, "invalid tid", 400)
+		return
+	}
+	tid := int32(tidVal)
+
+	db.tidIndexMu.RLock()
+	matched := db.tidIndex[tid]
+	db.tidIndexMu.RUnlock()
+
+	if len(matched) == 0 {
+		http.Error(w, "tid not found", 404)
+		return
+	}
+
+	// 二分查找：找到 >= idx 的第一个位置
+	pos := sort.SearchInts(matched, idx)
+	// 如果精确命中，pos 就是位置；否则返回最近的位置
+	found := false
+	if pos < len(matched) && matched[pos] == idx {
+		found = true
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"position": pos,
+		"total":    len(matched),
+		"found":    found,
+	})
 }
 
 func handleInstructions(w http.ResponseWriter, r *http.Request) {

@@ -1476,23 +1476,25 @@ async function smartJump(idx) {
 
 async function doJumpToPage(idx) {
   if (currentTidFilter !== '') {
-    // tid 过滤模式：idx 是全局索引，需要找到它在过滤结果中的逻辑位置
-    // 先加载包含该 idx 的页（后端会返回正确的 total）
-    // 用二分思路：请求 offset=0&limit=1&tid=X 拿到 filteredTotal，然后估算位置
-    // 更简单的方式：直接请求一个大 offset 让后端扫描，但这太慢
-    // 最实用：临时切到全部线程跳过去，再切回来
-    const savedTid = currentTidFilter;
-    currentTidFilter = '';
-    document.getElementById('tidFilter').value = '';
-    totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
-    const page = Math.floor(idx / PAGE_SIZE);
-    await gotoPage(page);
-    const row = container.querySelector('[data-idx="' + idx + '"]');
-    if (row) row.scrollIntoView({ block: 'center' });
-    selectInstruction(idx);
-    // 切回 tid 过滤（不重新加载页面，保持当前视图）
-    currentTidFilter = savedTid;
-    document.getElementById('tidFilter').value = savedTid;
+    // tid 过滤模式：idx 是全局索引，需要查询它在过滤结果中的位置
+    try {
+      const data = await fetchJSON('/api/tid-position?index=' + idx + '&tid=' + currentTidFilter);
+      if (data.found) {
+        // position 是该 index 在 tid 过滤结果中的第几条（0-based）
+        const filteredPage = Math.floor(data.position / PAGE_SIZE);
+        await gotoPage(filteredPage);
+        // 加载完成后在 DOM 中找到对应行
+        const row = container.querySelector('[data-idx="' + idx + '"]');
+        if (row) row.scrollIntoView({ block: 'center' });
+        selectInstruction(idx);
+        return;
+      }
+      // 该 index 不属于当前 tid，提示用户
+      document.getElementById('statusBar').textContent =
+        '行 #' + idx + ' 不属于线程 T' + currentTidFilter;
+    } catch(e) {
+      document.getElementById('statusBar').textContent = '查询 tid 位置失败';
+    }
   } else {
     const page = Math.floor(idx / PAGE_SIZE);
     await gotoPage(page);
