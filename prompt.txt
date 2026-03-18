@@ -15,31 +15,40 @@
 
 签名特征：（在这里描述你的初步判断，如 base64、固定前缀等）
 
-## 分析方法：从底向上的数据溯源
+## 核心分析方法：从底向上的数据溯源
 
 ### 第一步：定位目标数据
 - search_memory 搜索目标签名的特征字节（原始字符串、base64 解码后的 hex 等）
 - 如果签名看起来是 base64，也搜索 base64 字符表定位编码函数
 
 ### 第二步：查看上下文
-- 对搜索命中的指令，用 get_instructions(center=命中行号, context_size=30) 查看前后上下文
-- 关注：哪条 str 写入了目标数据？寄存器值从哪来？哪条 ldr 读取了源数据？bl/blr 调用了什么函数？
+- 对搜索命中的指令，用 `get_instructions(center=命中行号, context_size=30)` 查看前后上下文
+- 关注：
+  - 哪条 str 指令写入了目标数据？寄存器值从哪来？
+  - 哪条 ldr 指令读取了源数据？读的地址是什么？
+  - bl/blr 调用了什么函数？（可能是加密/编码函数）
 
 ### 第三步：数据溯源链（核心循环，反复执行直到追溯到输入数据）
 
 ```
-发现 str x1, [addr] 写入了目标数据
+发现感兴趣的指令（如 str x1, [addr] 写入了目标数据）
     ↓
-查看 x1 从哪来 → get_instructions(center=行号) 向上看上下文
+查看 x1 从哪来 → 向上看上下文指令
     ↓
-情况A - ldr x1, [0x123456]（从内存读取）：
+找到 ldr x1, [0x123456] 或 mov x1, x2 等
+    ↓
+如果是 ldr（从内存读取）：
     → set_watchpoint(addr=0x123456, size=8)
     → watchpoint_traceback(before_index=ldr所在行号, type_filter=write)
-    → 找到最后写入 0x123456 的 str 指令 → 对该 str 重复此过程
+    → 找到最后写入 0x123456 的 str 指令
+    → 对该 str 指令重复此过程
     ↓
-情况B - mov/运算指令：继续向上追踪源寄存器
+如果是 mov/运算指令：
+    → 继续向上追踪源寄存器
     ↓
-情况C - bl/blr 函数返回值：进入该函数分析，或用 IDA 反编译
+如果是 bl/blr（函数调用返回值）：
+    → 进入该函数分析（用 get_instructions 查看函数内部）
+    → 或用 IDA 反编译该函数地址
 ```
 
 ### 第四步：识别算法模式(同时也要警惕魔改算法)
@@ -49,13 +58,19 @@
 - 异或/位运算：eor, orr, and 指令密集出现
 - 查表：ldrb + 大量内存读取
 
+### 第五步：记录和还原
+- 每追溯一层，记录：地址、指令、数据变换关系
+- 逐步拼出完整的算法流程
+- 最终用代码还原纯算逻辑
+
 ## 工具使用要点
 
-1. search_instructions 关键词要精确，利用 "instrText pcText regText" 拼接特性构造跨字段关键词减少结果
-2. 找到关键指令后用 get_instructions(center=行号) 看上下文，比盲目翻页高效
-3. set_watchpoint + watchpoint_traceback 是追踪"这个数据从哪来"的黄金组合
-4. 用 get_memory + highlight 确认某个地址的实际数据内容
-5. 多线程 trace 中用 tid 过滤只看目标线程
+1. **搜索要精确**：search_instructions 的关键词要尽量长，利用 "instrText pcText regText" 的拼接特性构造跨字段关键词
+2. **善用 center 模式**：找到关键指令后，用 get_instructions(center=行号) 看上下文，比盲目翻页高效得多
+3. **watchpoint + traceback 是黄金组合**：任何"这个数据从哪来"的问题都用这个组合解决
+4. **注意线程**：多线程 trace 中，用 tid 过滤只看目标线程
+5. **highlight 验证数据**：用 get_memory + highlight 确认某个地址的实际数据内容
+6. **分页获取大结果集**：搜索结果可能很多，先看前几条找规律，不要一次拉太多
 
 ## 要求
 
