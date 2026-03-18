@@ -182,6 +182,7 @@ func main() {
 	http.HandleFunc("/api/functions", handleFunctions)
 	http.HandleFunc("/api/calltree", handleCallTimeline)
 	http.HandleFunc("/api/session", handleSession)
+	http.HandleFunc("/api/tid", handleTid)
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
@@ -711,6 +712,22 @@ func handleInfo(w http.ResponseWriter, r *http.Request) {
 		"indexDone":    db.indexDone.Load(),
 		"threadIds":    tids,
 	})
+}
+
+func handleTid(w http.ResponseWriter, r *http.Request) {
+	idx, err := strconv.Atoi(r.URL.Query().Get("index"))
+	if err != nil || idx < 0 {
+		http.Error(w, "invalid index", 400)
+		return
+	}
+	db.tidMu.RLock()
+	defer db.tidMu.RUnlock()
+	if idx >= len(db.tids) {
+		http.Error(w, "index out of range", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"tid": db.tids[idx]})
 }
 
 func handleInstructions(w http.ResponseWriter, r *http.Request) {

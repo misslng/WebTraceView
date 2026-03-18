@@ -112,6 +112,13 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .modal-header h2 { font-size: 13px; color: #569cd6; flex: 1; }
 .modal-header button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 .modal-header button:hover { background: #505050; }
+.tid-dialog-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 2000; display: flex; align-items: center; justify-content: center; }
+.tid-dialog { background: #252526; border: 1px solid #555; border-radius: 6px; padding: 16px 20px; min-width: 320px; max-width: 420px; }
+.tid-dialog p { color: #d4d4d4; font-size: 13px; margin: 0 0 14px 0; line-height: 1.5; }
+.tid-dialog .tid-btns { display: flex; gap: 8px; justify-content: flex-end; }
+.tid-dialog .tid-btns button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 6px 14px; font-size: 12px; font-family: inherit; border-radius: 4px; cursor: pointer; }
+.tid-dialog .tid-btns button:hover { background: #505050; }
+.tid-dialog .tid-btns button.primary { background: #094771; border-color: #1177bb; color: #fff; }
 .modal-body { flex: 1; overflow: hidden; padding: 0; position: relative; }
 .mem-tag { font-size: 9px; padding: 0 3px; border-radius: 2px; flex-shrink: 0; font-weight: bold; }
 .mem-tag.r { color: #4ec9b0; background: #1e3a2e; }
@@ -187,7 +194,6 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   <input type="text" id="gotoPage" placeholder="跳转页码..." style="width:100px">
   <span style="color:#555">│</span>
   <select id="tidFilter" title="线程过滤"><option value="">全部线程</option></select>
-  <button class="nav-btn" id="btnTidRestore" title="恢复之前的线程过滤" style="display:none;color:#d19a66;font-size:11px">↩ 恢复T?</button>
   <span style="color:#555">│</span>
   <button class="nav-btn" id="btnNavBack" title="后退 (Alt+Left)" disabled>⬅</button>
   <button class="nav-btn" id="btnNavForward" title="前进 (Alt+Right)" disabled>➡</button>
@@ -379,7 +385,6 @@ let minPageInView = 0;
 let hlAddr = -1, hlSize = 0;  // 高亮范围
 let lastRegions = null;       // 缓存当前显示的 regions
 let currentTidFilter = '';    // 当前 tid 过滤（空=全部）
-let prevTidFilter = '';       // 跳转前暂存的 tid 过滤，用于恢复
 
 // ==================== 导航历史 ====================
 let navHistory = [];
@@ -756,24 +761,9 @@ async function init() {
   // tid 过滤
   document.getElementById('tidFilter').addEventListener('change', e => {
     currentTidFilter = e.target.value;
-    prevTidFilter = '';
-    document.getElementById('btnTidRestore').style.display = 'none';
     currentPage = 0;
     minPageInView = 0;
     gotoPage(0);
-  });
-
-  // tid 恢复按钮
-  document.getElementById('btnTidRestore').addEventListener('click', () => {
-    if (prevTidFilter) {
-      currentTidFilter = prevTidFilter;
-      document.getElementById('tidFilter').value = prevTidFilter;
-      prevTidFilter = '';
-      document.getElementById('btnTidRestore').style.display = 'none';
-      currentPage = 0;
-      minPageInView = 0;
-      gotoPage(0);
-    }
   });
 
   // 滚到底自动下一页，滚到顶自动上一页
@@ -1428,25 +1418,95 @@ async function pollInstrSearchResults() {
   } catch(e) {}
 }
 
-async function jumpToInstr(idx) {
-  navPush(idx);
-  // 如果有 tid 过滤，临时切到全部线程视图
+// ==================== Smart tid-aware jump ====================
+function showTidDialog(idx, targetTid) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'tid-dialog-overlay';
+    const box = document.createElement('div');
+    box.className = 'tid-dialog';
+    box.innerHTML = '<p>指令 #' + idx + ' 属于线程 <b style="color:#d19a66">T' + targetTid + '</b>，'
+      + '当前过滤为 <b style="color:#4ec9b0">T' + currentTidFilter + '</b></p>'
+      + '<div class="tid-btns">'
+      + '<button class="primary" data-action="switch">切到 T' + targetTid + '</button>'
+      + '<button data-action="all">全部线程</button>'
+      + '<button data-action="cancel">取消</button>'
+      + '</div>';
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    box.querySelector('.tid-btns').addEventListener('click', e => {
+      const action = e.target.dataset.action;
+      if (action) { overlay.remove(); resolve(action); }
+    });
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) { overlay.remove(); resolve('cancel'); }
+    });
+  });
+}
+
+// smartJump returns: 'direct' = proceed with normal jump, 'done' = already jumped, 'cancel' = abort
+async function smartJump(idx) {
+  if (currentTidFilter === '') return 'direct'; // 无过滤，直接跳
+  try {
+    const data = await fetchJSON('/api/tid?index=' + idx);
+    const targetTid = data.tid;
+    if (String(targetTid) === currentTidFilter) return 'direct'; // 同线程，直接跳（tid过滤模式下不能用全局页码）
+    // 不同线程，弹框让用户选
+    const action = await showTidDialog(idx, targetTid);
+    if (action === 'cancel') return 'cancel';
+    if (action === 'switch') {
+      // 切到目标线程
+      currentTidFilter = String(targetTid);
+      document.getElementById('tidFilter').value = currentTidFilter;
+      currentPage = 0;
+      minPageInView = 0;
+      return 'direct'; // 切换后仍需在新过滤下定位
+    }
+    if (action === 'all') {
+      currentTidFilter = '';
+      document.getElementById('tidFilter').value = '';
+      totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
+      return 'direct';
+    }
+  } catch(e) {
+    return 'direct';
+  }
+  return 'direct';
+}
+
+async function doJumpToPage(idx) {
   if (currentTidFilter !== '') {
-    prevTidFilter = currentTidFilter;
+    // tid 过滤模式：idx 是全局索引，需要找到它在过滤结果中的逻辑位置
+    // 先加载包含该 idx 的页（后端会返回正确的 total）
+    // 用二分思路：请求 offset=0&limit=1&tid=X 拿到 filteredTotal，然后估算位置
+    // 更简单的方式：直接请求一个大 offset 让后端扫描，但这太慢
+    // 最实用：临时切到全部线程跳过去，再切回来
+    const savedTid = currentTidFilter;
     currentTidFilter = '';
     document.getElementById('tidFilter').value = '';
-    // 恢复全局 totalPages，否则 gotoPage 会因为页码超出被拦截
     totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
-    // 显示恢复按钮
-    const restoreBtn = document.getElementById('btnTidRestore');
-    restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
-    restoreBtn.style.display = '';
+    const page = Math.floor(idx / PAGE_SIZE);
+    await gotoPage(page);
+    const row = container.querySelector('[data-idx="' + idx + '"]');
+    if (row) row.scrollIntoView({ block: 'center' });
+    selectInstruction(idx);
+    // 切回 tid 过滤（不重新加载页面，保持当前视图）
+    currentTidFilter = savedTid;
+    document.getElementById('tidFilter').value = savedTid;
+  } else {
+    const page = Math.floor(idx / PAGE_SIZE);
+    await gotoPage(page);
+    const row = container.querySelector('[data-idx="' + idx + '"]');
+    if (row) row.scrollIntoView({ block: 'center' });
+    selectInstruction(idx);
   }
-  const page = Math.floor(idx / PAGE_SIZE);
-  await gotoPage(page);
-  const row = container.querySelector('[data-idx="' + idx + '"]');
-  if (row) row.scrollIntoView({ block: 'center' });
-  selectInstruction(idx);
+}
+
+async function jumpToInstr(idx) {
+  navPush(idx);
+  const result = await smartJump(idx);
+  if (result === 'cancel') return;
+  await doJumpToPage(idx);
 }
 
 initInstrSearch();
@@ -1837,21 +1897,9 @@ async function jumpToSearchResult(idx, addrStr, patternLen) {
   hlSize = patternLen;
   document.getElementById('hlAddr').value = addrStr;
   document.getElementById('hlSize').value = patternLen;
-  // 如果有 tid 过滤，临时切到全部线程视图
-  if (currentTidFilter !== '') {
-    prevTidFilter = currentTidFilter;
-    currentTidFilter = '';
-    document.getElementById('tidFilter').value = '';
-    totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
-    const restoreBtn = document.getElementById('btnTidRestore');
-    restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
-    restoreBtn.style.display = '';
-  }
-  const page = Math.floor(idx / PAGE_SIZE);
-  await gotoPage(page);
-  const row = container.querySelector('[data-idx="' + idx + '"]');
-  if (row) row.scrollIntoView({ block: 'center' });
-  selectInstruction(idx);
+  const result = await smartJump(idx);
+  if (result === 'cancel') return;
+  await doJumpToPage(idx);
 }
 
 initSearch();
