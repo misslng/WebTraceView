@@ -27,7 +27,7 @@ var frontendHTML []byte
 
 // ==================== 核心设计 ====================
 // 一条指令一条记录，格式：
-//   magic(4) pc(8) instrLen(2) instr regLen(2) reg
+//   magic(4) pc(8) pcTextLen(2) pcText instrLen(2) instr regLen(2) reg
 //   readChunkCnt(4) [base(8) len(4) data]×N
 //   writeChunkCnt(4) [base(8) len(4) data]×N
 // 第0条是 baseline，之后每条 = 一条指令
@@ -214,6 +214,17 @@ func (db *TraceDB) buildIndexAsync() {
 		}
 		pc = binary.LittleEndian.Uint64(pcBuf)
 		offset += 8
+
+		// 读 pcTextLen(2) + pcText
+		var pcTextLen uint16
+		if err := binary.Read(br, binary.LittleEndian, &pcTextLen); err != nil {
+			break
+		}
+		offset += 2
+		if _, err := io.CopyN(io.Discard, br, int64(pcTextLen)); err != nil {
+			break
+		}
+		offset += int64(pcTextLen)
 
 		// 如果上一条是 bl/blr，当前 PC 就是被调用函数的入口
 		if pendingCallIdx >= 0 {
@@ -432,13 +443,22 @@ func (db *TraceDB) seekToRecord(idx int) int64 {
 	return offset
 }
 
-// skipRecordFile 跳过一条完整记录（新格式：读chunks + 写chunks）
+// skipRecordFile 跳过一条完整记录（新格式：pcText + instrText + regText + readChunks + writeChunks）
 func skipRecordFile(f *os.File, offset int64, buf []byte) int64 {
 	if _, err := f.ReadAt(buf[:14], offset); err != nil {
 		return offset
 	}
-	p := offset + 4 + 8
-	instrLen := int64(binary.LittleEndian.Uint16(buf[12:14]))
+	p := offset + 4 + 8 // skip magic + pc
+
+	// skip pcText
+	pcTextLen := int64(binary.LittleEndian.Uint16(buf[12:14]))
+	p += 2 + pcTextLen
+
+	// read instrLen
+	if _, err := f.ReadAt(buf[:2], p); err != nil {
+		return offset
+	}
+	instrLen := int64(binary.LittleEndian.Uint16(buf[:2]))
 	p += 2 + instrLen
 
 	if _, err := f.ReadAt(buf[:2], p); err != nil {
@@ -480,6 +500,7 @@ func skipChunkGroupFile(f *os.File, p int64, buf []byte) int64 {
 
 type InstrInfo struct {
 	PC         uint64
+	PCText     string // "libc.so+0x1a3b4" 或 "0x..."
 	InstrText  string
 	RegText    string
 	MemFlag    string // "", "R", "W", "RW"
@@ -495,8 +516,21 @@ func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
 		return nil, fmt.Errorf("invalid magic")
 	}
 	pc := binary.LittleEndian.Uint64(hdr[4:12])
-	instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+	pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
 	p := offset + 14
+
+	pcTextBuf := make([]byte, pcTextLen)
+	if _, err := f.ReadAt(pcTextBuf, p); err != nil {
+		return nil, err
+	}
+	p += int64(pcTextLen)
+
+	ilBuf := make([]byte, 2)
+	if _, err := f.ReadAt(ilBuf, p); err != nil {
+		return nil, err
+	}
+	instrLen := int(binary.LittleEndian.Uint16(ilBuf))
+	p += 2
 
 	instrBuf := make([]byte, instrLen)
 	if _, err := f.ReadAt(instrBuf, p); err != nil {
@@ -551,7 +585,7 @@ func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
 	}
 
 	return &InstrInfo{
-		PC: pc, InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
+		PC: pc, PCText: string(pcTextBuf), InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
 	}, nil
 }
 
@@ -566,8 +600,16 @@ func readChunksFromFile(f *os.File, offset int64) (readChunks, writeChunks []Mem
 	if _, err = f.ReadAt(hdr, offset); err != nil {
 		return
 	}
-	instrLen := int64(binary.LittleEndian.Uint16(hdr[12:14]))
-	p := offset + 14 + instrLen
+	pcTextLen := int64(binary.LittleEndian.Uint16(hdr[12:14]))
+	p := offset + 14 + pcTextLen
+
+	// read instrLen
+	ilBuf := make([]byte, 2)
+	if _, err = f.ReadAt(ilBuf, p); err != nil {
+		return
+	}
+	instrLen := int64(binary.LittleEndian.Uint16(ilBuf))
+	p += 2 + instrLen
 
 	rlBuf := make([]byte, 2)
 	if _, err = f.ReadAt(rlBuf, p); err != nil {
@@ -680,7 +722,7 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 		db.depthMu.RUnlock()
 		items = append(items, Item{
 			Index:   i,
-			PC:      fmt.Sprintf("0x%x", info.PC),
+			PC:      info.PCText,
 			Instr:   info.InstrText,
 			Regs:    info.RegText,
 			Depth:   depth,
@@ -981,8 +1023,19 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
-		pc := binary.LittleEndian.Uint64(hdr[4:12])
-		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		// hdr[4:12] = pc (unused), hdr[12:14] = pcTextLen
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		pcTextBuf := make([]byte, pcTextLen)
+		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
+			return local
+		}
+		pcText := string(pcTextBuf)
+
+		var instrLen16 uint16
+		if err := binary.Read(br, binary.LittleEndian, &instrLen16); err != nil {
+			return local
+		}
+		instrLen := int(instrLen16)
 
 		// 复用 instrBuf
 		if cap(instrBuf) < instrLen {
@@ -1004,9 +1057,9 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 		}
 
 		// 读 readChunks 并搜索
-		local = searchChunkGroup(br, job, idx, pc, string(instrBuf), "read", local)
+		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), "read", local)
 		// 读 writeChunks 并搜索
-		local = searchChunkGroup(br, job, idx, pc, string(instrBuf), "write", local)
+		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), "write", local)
 
 		idx++
 		job.scanned.Add(1)
@@ -1019,7 +1072,7 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 	return local
 }
 
-func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, instrText string, chunkType string, local []SearchMatch) []SearchMatch {
+func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, instrText string, chunkType string, local []SearchMatch) []SearchMatch {
 	var cnt uint32
 	if err := binary.Read(br, binary.LittleEndian, &cnt); err != nil {
 		return local
@@ -1077,7 +1130,7 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pc uint64, inst
 				preview := extractStringPreview(data[previewStart:previewEnd], 64)
 				local = append(local, SearchMatch{
 					Index:       idx,
-					PC:          fmt.Sprintf("0x%x", pc),
+					PC:          pcText,
 					InstrText:   instrText,
 					ChunkBase:   fmt.Sprintf("0x%x", matchAddr),
 					MatchOff:    matchStart,
@@ -1306,8 +1359,19 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			return local
 		}
 
-		pc := binary.LittleEndian.Uint64(hdr[4:12])
-		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		// hdr[12:14] = pcTextLen
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		pcTextBuf := make([]byte, pcTextLen)
+		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
+			return local
+		}
+		pcText := string(pcTextBuf)
+
+		var instrLen16 uint16
+		if err := binary.Read(br, binary.LittleEndian, &instrLen16); err != nil {
+			return local
+		}
+		instrLen := int(instrLen16)
 
 		if cap(instrBuf) < instrLen {
 			instrBuf = make([]byte, instrLen, instrLen*2)
@@ -1337,9 +1401,8 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 
 		instrText := string(instrBuf)
 		regText := string(regBuf)
-		pcStr := fmt.Sprintf("0x%x", pc)
 
-		haystack := strings.ToLower(instrText + " " + pcStr + " " + regText)
+		haystack := strings.ToLower(instrText + " " + pcText + " " + regText)
 		if strings.Contains(haystack, job.keyword) {
 			depth := 0
 			db.depthMu.RLock()
@@ -1349,7 +1412,7 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			db.depthMu.RUnlock()
 
 			local = append(local, InstrSearchMatch{
-				Index: idx, PC: pcStr, Instr: instrText, Regs: regText, Depth: depth,
+				Index: idx, PC: pcText, Instr: instrText, Regs: regText, Depth: depth,
 			})
 		}
 
@@ -1609,16 +1672,23 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
-		pc := binary.LittleEndian.Uint64(hdr[4:12])
-		instrLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		pcTextBuf := make([]byte, pcTextLen)
+		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
+			return local
+		}
+		pcText := string(pcTextBuf)
+		var instrLen16 uint16
+		binary.Read(br, binary.LittleEndian, &instrLen16)
+		instrLen := int(instrLen16)
 		instrBuf := make([]byte, instrLen)
 		io.ReadFull(br, instrBuf)
 		var regLen uint16
 		binary.Read(br, binary.LittleEndian, &regLen)
 		io.CopyN(io.Discard, br, int64(regLen))
 
-		local = wpCheckChunks(br, job, idx, pc, string(instrBuf), "read", wLo, wHi, local)
-		local = wpCheckChunks(br, job, idx, pc, string(instrBuf), "write", wLo, wHi, local)
+		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), "read", wLo, wHi, local)
+		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), "write", wLo, wHi, local)
 
 		idx++
 		job.scanned.Add(1)
@@ -1629,7 +1699,7 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 	return local
 }
 
-func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, instrText, chunkType string, wLo, wHi uint64, local []WatchpointMatch) []WatchpointMatch {
+func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pcText string, instrText, chunkType string, wLo, wHi uint64, local []WatchpointMatch) []WatchpointMatch {
 	var cnt uint32
 	binary.Read(br, binary.LittleEndian, &cnt)
 	hdr := make([]byte, 12)
@@ -1681,7 +1751,7 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pc uint64, ins
 			}
 			preview := extractStringPreview(data[previewStart:previewEnd], 64)
 			local = append(local, WatchpointMatch{
-				Index: idx, PC: fmt.Sprintf("0x%x", pc), InstrText: instrText,
+				Index: idx, PC: pcText, InstrText: instrText,
 				ChunkBase: fmt.Sprintf("0x%x", base), ChunkType: chunkType,
 				DataPreview: preview,
 			})
@@ -1846,8 +1916,13 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		if string(magic) != "UTRA" {
 			return
 		}
-		var pc uint64
-		binary.Read(br, binary.LittleEndian, &pc)
+		// skip pc(8), read pcText
+		io.CopyN(io.Discard, br, 8)
+		var pcTextLen uint16
+		binary.Read(br, binary.LittleEndian, &pcTextLen)
+		pcTextBuf := make([]byte, pcTextLen)
+		io.ReadFull(br, pcTextBuf)
+		pcText := string(pcTextBuf)
 		var instrLen uint16
 		binary.Read(br, binary.LittleEndian, &instrLen)
 		instrBuf := make([]byte, instrLen)
@@ -1873,7 +1948,7 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 				value := writeRegs[valStart:valEnd]
 				job.mu.Lock()
 				job.matches = append(job.matches, RegTraceMatch{
-					Index: idx, PC: fmt.Sprintf("0x%x", pc),
+					Index: idx, PC: pcText,
 					Instr: string(instrBuf), Value: value,
 				})
 				job.mu.Unlock()

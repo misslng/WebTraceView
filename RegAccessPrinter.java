@@ -76,7 +76,7 @@ public class RegAccessPrinter {
         // 如果有未写出的 pending，强制写出
         if (pendingRecord != null && globalWriter != null) {
             globalWriter.enqueue(new TraceRecord(
-                    pendingRecord.pc, pendingRecord.instrText, pendingRecord.regText,
+                    pendingRecord.pc, pendingRecord.pcText, pendingRecord.instrText, pendingRecord.regText,
                     pendingRecord.readChunks, Collections.emptyList()));
             pendingRecord = null;
         }
@@ -87,6 +87,7 @@ public class RegAccessPrinter {
         tracingEmulator = null;
         readAccessPoints.clear();
         writeAccessPoints.clear();
+        pcCache.clear();
     }
 
     private static void installAccessHooks(Emulator<?> emulator) {
@@ -186,11 +187,11 @@ public class RegAccessPrinter {
             // 如果有上一条未配对的 pending，先写出
             if (pendingRecord != null) {
                 globalWriter.enqueue(new TraceRecord(
-                        pendingRecord.pc, pendingRecord.instrText, pendingRecord.regText,
+                        pendingRecord.pc, pendingRecord.pcText, pendingRecord.instrText, pendingRecord.regText,
                         pendingRecord.readChunks, Collections.emptyList()));
             }
             List<MemoryChunk> readChunks = drainAccessPoints(readAccessPoints, backend);
-            pendingRecord = new PendingRecord(this.address, instrText,
+            pendingRecord = new PendingRecord(this.address, resolvePC(this.address), instrText,
                     regSnapshot, readChunks);
         } else {
             // ===== 第二次 print（写寄存器）=====
@@ -207,6 +208,7 @@ public class RegAccessPrinter {
 
                 globalWriter.enqueue(new TraceRecord(
                         pendingRecord.pc,
+                        pendingRecord.pcText,
                         pendingRecord.instrText,
                         combinedRegText,
                         allRead,
@@ -216,7 +218,7 @@ public class RegAccessPrinter {
                 // 没有 pending 却收到写 pass，单独写出
                 List<MemoryChunk> writeChunks = drainAccessPoints(writeAccessPoints, backend);
                 globalWriter.enqueue(new TraceRecord(
-                        this.address, instrText, regSnapshot,
+                        this.address, resolvePC(this.address), instrText, regSnapshot,
                         Collections.emptyList(), writeChunks));
             }
         }
@@ -243,6 +245,56 @@ public class RegAccessPrinter {
 
     private static final int WINDOW_RADIUS = 128;
 
+    // ==================== PC 符号化 ====================
+
+    /** PC -> 符号化文本 的缓存，避免重复查找 */
+    private static final ConcurrentHashMap<Long, String> pcCache = new ConcurrentHashMap<>();
+
+    /**
+     * 将绝对 PC 地址解析为可读格式：
+     *   有符号时: "libc.so:malloc+0x4"
+     *   无符号时: "libc.so+0x1a3b4"
+     *   找不到模块: "0x40591db0"
+     */
+    private static String resolvePC(long pc) {
+        String cached = pcCache.get(pc);
+        if (cached != null) return cached;
+
+        String result = resolvePCInternal(pc);
+        pcCache.put(pc, result);
+        return result;
+    }
+
+    private static String resolvePCInternal(long pc) {
+        Emulator<?> emu = tracingEmulator;
+        if (emu != null) {
+            try {
+                com.github.unidbg.memory.Memory memory = emu.getMemory();
+                com.github.unidbg.Module module = memory.findModuleByAddress(pc);
+                if (module != null) {
+                    long moduleOffset = pc - module.base;
+                    // 尝试查找最近的符号
+                    try {
+                        com.github.unidbg.Symbol sym = module.findClosestSymbolByAddress(pc, true);
+                        if (sym != null) {
+                            long symOffset = pc - sym.getAddress();
+                            if (symOffset >= 0 && symOffset < 0x10000) {
+                                // 符号偏移合理，使用 module:symbol+offset 格式
+                                if (symOffset == 0) {
+                                    return module.name + ":" + sym.getName();
+                                }
+                                return module.name + ":" + sym.getName() + "+0x" + Long.toHexString(symOffset);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                    // 没有符号，回退到 module+offset
+                    return module.name + "+0x" + Long.toHexString(moduleOffset);
+                }
+            } catch (Exception ignored) {}
+        }
+        return "0x" + Long.toHexString(pc);
+    }
+
     // ==================== 数据结构 ====================
 
     static class AccessPoint {
@@ -266,11 +318,13 @@ public class RegAccessPrinter {
     /** 暂存第一次 print 的数据 */
     static class PendingRecord {
         final long pc;
+        final String pcText;
         final String instrText;
         final String regText;
         final List<MemoryChunk> readChunks;
-        PendingRecord(long pc, String instrText, String regText, List<MemoryChunk> readChunks) {
+        PendingRecord(long pc, String pcText, String instrText, String regText, List<MemoryChunk> readChunks) {
             this.pc = pc;
+            this.pcText = pcText;
             this.instrText = instrText;
             this.regText = regText;
             this.readChunks = readChunks;
@@ -280,14 +334,16 @@ public class RegAccessPrinter {
     /** 一条完整的 trace 记录（一条指令） */
     static class TraceRecord {
         final long pc;
+        final String pcText;   // "libc.so+0x1a3b4" 或 "0x40591db0"
         final String instrText;
         final String regText;
         final List<MemoryChunk> readChunks;
         final List<MemoryChunk> writeChunks;
 
-        TraceRecord(long pc, String instrText, String regText,
+        TraceRecord(long pc, String pcText, String instrText, String regText,
                     List<MemoryChunk> readChunks, List<MemoryChunk> writeChunks) {
             this.pc = pc;
+            this.pcText = pcText;
             this.instrText = instrText;
             this.regText = regText;
             this.readChunks = readChunks;
@@ -302,6 +358,8 @@ public class RegAccessPrinter {
      *
      *   magic          : 4B   "UTRA"
      *   pc             : 8B
+     *   pcTextLen      : 2B
+     *   pcTextBytes    : pcTextLen B   (e.g. "libc.so+0x1a3b4")
      *   instrLen       : 2B
      *   instrBytes     : instrLen B
      *   regTextLen     : 2B
@@ -376,15 +434,18 @@ public class RegAccessPrinter {
         }
 
         private void writeRecord(BufferedOutputStream bos, TraceRecord record) throws IOException {
+            byte[] pcTextBytes = record.pcText.getBytes(StandardCharsets.UTF_8);
             byte[] instrBytes = record.instrText.getBytes(StandardCharsets.UTF_8);
             byte[] regBytes = record.regText.getBytes(StandardCharsets.UTF_8);
 
-            // header: magic + pc + instrLen + instr + regLen + reg + readChunkCnt
-            int headerSize = 4 + 8 + 2 + instrBytes.length + 2 + regBytes.length + 4;
+            // header: magic + pc + pcTextLen + pcText + instrLen + instr + regLen + reg + readChunkCnt
+            int headerSize = 4 + 8 + 2 + pcTextBytes.length + 2 + instrBytes.length + 2 + regBytes.length + 4;
             ByteBuffer header = ByteBuffer.allocate(headerSize);
             header.order(ByteOrder.LITTLE_ENDIAN);
             header.put(MAGIC);
             header.putLong(record.pc);
+            header.putShort((short) pcTextBytes.length);
+            header.put(pcTextBytes);
             header.putShort((short) instrBytes.length);
             header.put(instrBytes);
             header.putShort((short) regBytes.length);
