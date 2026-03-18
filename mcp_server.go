@@ -151,6 +151,7 @@ func setupMCP() http.Handler {
 
 	s.AddTool(mcp.NewTool("set_watchpoint",
 		mcp.WithDescription(`设置内存监控点，找出 trace 中所有访问指定地址范围的指令。用于追踪某个内存地址被哪些指令读写。结果按行号升序排列。
+重要：set_watchpoint 只是找出所有访问记录。如果你需要回答"某条指令读取的数据是谁写入的"这类因果问题，必须配合 watchpoint_traceback 使用——它能从指定行号向上回溯，找到最近的写入者。
 提示：拿到结果后，可将设置监控点时的 addr 和 size 传给 get_memory 的 highlight_addr/highlight_size 参数，在内存快照中高亮定位监控范围的数据。
 
 返回字段说明:
@@ -172,10 +173,14 @@ func setupMCP() http.Handler {
 	), handleSetWatchpoint)
 
 	s.AddTool(mcp.NewTool("watchpoint_traceback",
-		mcp.WithDescription(`在当前监控点结果中，从指定行号向上回溯，找到该行之前最近的内存访问记录。结果按行号降序排列（最邻近目标行的排最前）。
-必须先调用 set_watchpoint 建立监控点。
+		mcp.WithDescription(`【必须先调用 set_watchpoint】在监控点结果中，从指定行号向上回溯，找到该行之前最近的内存访问记录。这是追踪数据来源的核心工具。
+结果按行号降序排列（最邻近目标行的排最前），第一条结果就是离目标最近的访问。
 
-典型场景：某条 ldr 指令从地址 X 读取了数据，想知道是谁最后写入了地址 X——先 set_watchpoint 监控地址 X，再用本接口从 ldr 所在行号回溯，过滤仅写入 [W]，第一条结果大概率就是目标 str 指令。
+使用流程：
+1. 先调用 set_watchpoint 监控目标地址
+2. 再调用 watchpoint_traceback，传入目标指令的行号和过滤类型
+
+典型场景：某条 ldr 指令从地址 X 读取了数据，想知道是谁最后写入了地址 X——先 set_watchpoint 监控地址 X，再用 watchpoint_traceback 从 ldr 所在行号回溯，type_filter 设为 write，第一条结果就是最后写入地址 X 的 str 指令。
 
 返回字段说明:
 - totalMatches: int, 满足条件的匹配总数
