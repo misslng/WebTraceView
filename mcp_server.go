@@ -122,13 +122,15 @@ func setupMCP() http.Handler {
 		mcp.WithDescription(`在 trace 所有指令中搜索关键词（大小写不敏感）。服务端将每条指令的 instrText + " " + pcText + " " + regText 用空格拼接为一个字符串并转小写，然后判断是否包含关键词。
 因此搜索范围覆盖汇编指令、PC地址/符号名、寄存器状态（含 => 后的写回值）。结果按行号升序排列。
 
-警告：请使用尽可能具体、完整的关键词！关键词应该是 instrText + pcText + regText 组合中的片段，而不是单独的汇编指令。
+警告：请使用尽可能具体、完整的关键词！关键词应该是 "instrText pcText regText" 这个拼接字符串中连续出现的片段。
+注意拼接顺序：instrText 在最前，pcText 在中间，regText 在最后，三者之间用空格分隔。关键词必须是这个拼接结果中连续的子串才能命中。
 - 差: "mov x0" — 只匹配汇编指令部分，会命中成千上万条，浪费 token
-- 好: "mov x0, x25 => x0=0x12345678" — 跨越汇编指令和寄存器写回值，精准定位到唯一一条
-- 好: "bl #0x4005c000 libmain.so+0x5bc10" — 跨越汇编指令和 PC 地址，精准定位
-- 好: "libmain.so+0x5bc04" — 搜索特定地址
+- 好: "str x0, [x2] (0x4005bc0c)libmain.so" — 跨越 instrText 和 pcText，精准定位
+- 好: "libmain.so+0x5bc04 sp=0xbffff680 => x0=" — 跨越 pcText 和 regText，精准定位
+- 好: "libmain.so+0x5bc04" — 搜索特定地址（在 pcText 中）
+- 好: "=> x0=0x12345678" — 搜索特定寄存器写回值（在 regText 中）
 - 好: "aes" — 搜索特定功能相关指令
-因为服务端是整行匹配，所以你可以利用这一点构造跨字段的关键词来大幅缩小结果集。
+因为服务端是整行匹配，所以你可以利用相邻字段的拼接构造跨字段关键词来大幅缩小结果集。
 
 返回字段说明:
 - done: bool, 搜索是否完成
