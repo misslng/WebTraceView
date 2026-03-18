@@ -182,7 +182,16 @@ public class RegAccessPrinter {
         }
 
         // 获取 unidbg 模拟线程 ID（协作式调度，同一 Java 线程，但 tid 不同）
-        int tid = emulator.getPid();
+        int tid = emulator.getPid(); // 默认用 pid
+        try {
+            com.github.unidbg.thread.ThreadDispatcher dispatcher = emulator.getThreadDispatcher();
+            if (dispatcher != null) {
+                com.github.unidbg.thread.RunnableTask task = dispatcher.getRunningTask();
+                if (task instanceof com.github.unidbg.thread.Task) {
+                    tid = ((com.github.unidbg.thread.Task) task).getId();
+                }
+            }
+        } catch (Exception ignored) {}
 
         String instrText = instruction.getMnemonic() + " " + instruction.getOpStr();
         // 只截取本次 print() 新增的寄存器文本，避免混入外部 log
