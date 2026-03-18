@@ -111,7 +111,8 @@ func setupMCP() http.Handler {
   - matchOffset: int, 匹配位置在该内存 chunk 原始数据中的字节偏移（chunkBase 已经包含了此偏移，highlight 时直接用 chunkBase 即可）
   - type: string, "read" 或 "write"，表示匹配数据是在读操作还是写操作中发现的
   - patternLen: int, 搜索模式的字节长度，可传给 get_memory 的 highlight_size
-  - dataPreview: string, 匹配位置附近的可打印字符串预览（最多 64 字节）`),
+  - dataPreview: string, 匹配位置附近的可打印字符串预览（最多 64 字节，不可打印字符被过滤）
+  - dataHex: string, 匹配到的原始数据的 hex 编码（长度等于 patternLen 的字节数），这是精确的原始字节，未经任何过滤`),
 		mcp.WithString("pattern", mcp.Required(), mcp.Description("搜索模式。hex 模式如 0a1b2c3d，string 模式如 hello")),
 		mcp.WithString("type", mcp.Required(), mcp.Description("hex 或 string")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),

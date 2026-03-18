@@ -132,6 +132,7 @@ type SearchMatch struct {
 	ChunkType   string `json:"type"` // "read" or "write"
 	PatternLen  int    `json:"patternLen"`
 	DataPreview string `json:"dataPreview"`
+	DataHex     string `json:"dataHex,omitempty"`
 }
 
 type SearchJob struct {
@@ -1327,6 +1328,12 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, 
 					previewEnd = dataLen
 				}
 				preview := extractStringPreview(data[previewStart:previewEnd], 64)
+				// Extract hex of matched bytes
+				hexEnd := matchStart + len(job.pattern)
+				if hexEnd > dataLen {
+					hexEnd = dataLen
+				}
+				dataHex := hex.EncodeToString(data[matchStart:hexEnd])
 				local = append(local, SearchMatch{
 					Index:       idx,
 					PC:          pcText,
@@ -1336,6 +1343,7 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, 
 					ChunkType:   chunkType,
 					PatternLen:  len(job.pattern),
 					DataPreview: preview,
+					DataHex:     dataHex,
 				})
 			}
 			off += pos + len(job.pattern)
