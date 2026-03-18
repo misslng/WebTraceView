@@ -373,6 +373,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 <script>
 const PAGE_SIZE = 500;
 let totalRecords = 0;
+let globalTotalRecords = 0; // 全局总数，不受 tid 过滤影响
 let indexDone = false;
 let currentPage = 0;
 let totalPages = 0;
@@ -822,7 +823,7 @@ async function init() {
   document.getElementById('gotoBox').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
       const line = parseInt(e.target.value);
-      if (!isNaN(line) && line >= 0 && line < totalRecords) {
+      if (!isNaN(line) && line >= 0 && line < globalTotalRecords) {
         jumpToInstr(line);
         e.target.value = '';
       }
@@ -1085,6 +1086,7 @@ async function refreshInfo() {
   try {
     const info = await fetchJSON('/api/info');
     totalRecords = info.totalRecords;
+    globalTotalRecords = info.totalRecords;
     indexDone = info.indexDone;
     totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE));
     const el = document.getElementById('totalInfo');
