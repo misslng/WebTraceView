@@ -1376,20 +1376,17 @@ async function pollInstrSearchResults() {
 
 async function jumpToInstr(idx) {
   navPush(idx);
-  // 如果有 tid 过滤，检查目标行是否属于当前过滤的线程
+  // 如果有 tid 过滤，临时切到全部线程视图
   if (currentTidFilter !== '') {
-    let targetTid = -1;
-    db_tidMu: {
-      // 快速检查：从 tids 数组判断（后端已在 /api/instructions 返回 threadId）
-      // 这里无法直接知道目标 tid，先临时切到全部线程跳过去
-      prevTidFilter = currentTidFilter;
-      currentTidFilter = '';
-      document.getElementById('tidFilter').value = '';
-      // 显示恢复按钮
-      const restoreBtn = document.getElementById('btnTidRestore');
-      restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
-      restoreBtn.style.display = '';
-    }
+    prevTidFilter = currentTidFilter;
+    currentTidFilter = '';
+    document.getElementById('tidFilter').value = '';
+    // 恢复全局 totalPages，否则 gotoPage 会因为页码超出被拦截
+    totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
+    // 显示恢复按钮
+    const restoreBtn = document.getElementById('btnTidRestore');
+    restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
+    restoreBtn.style.display = '';
   }
   const page = Math.floor(idx / PAGE_SIZE);
   await gotoPage(page);
