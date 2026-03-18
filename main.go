@@ -184,10 +184,12 @@ func main() {
 	http.HandleFunc("/api/session", handleSession)
 	http.HandleFunc("/api/tid", handleTid)
 	http.HandleFunc("/api/tid-position", handleTidPosition)
+	http.Handle("/mcp", setupMCP())
 	http.HandleFunc("/", handleFrontend)
 
 	addr := ":8080"
 	log.Printf("服务已启动: http://localhost%s", addr)
+	log.Printf("MCP 端点: http://localhost%s/mcp", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
