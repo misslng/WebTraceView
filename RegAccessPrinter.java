@@ -46,9 +46,9 @@ public class RegAccessPrinter {
 
     /**
      * 暂存第一次 print()（读寄存器）的信息，等第二次 print()（写寄存器）时合并写出。
-     * 因为 unidbg trace 是单线程顺序执行的，用 volatile 即可。
+     * 按模拟线程 ID 分开存储，避免多线程切换时错配。
      */
-    private static volatile PendingRecord pendingRecord;
+    private static final ConcurrentHashMap<Integer, PendingRecord> pendingRecords = new ConcurrentHashMap<>();
 
     private final boolean isWritePass;
 
@@ -66,19 +66,22 @@ public class RegAccessPrinter {
         tracingEmulator = emulator;
         readAccessPoints.clear();
         writeAccessPoints.clear();
-        pendingRecord = null;
+        pendingRecords.clear();
         globalWriter = new TraceWriter(outputPath);
         globalWriter.start();
         installAccessHooks(emulator);
     }
 
     public static void shutdownTrace() {
-        // 如果有未写出的 pending，强制写出
-        if (pendingRecord != null && globalWriter != null) {
-            globalWriter.enqueue(new TraceRecord(
-                    pendingRecord.pc, pendingRecord.pcText, pendingRecord.instrText, pendingRecord.regText,
-                    pendingRecord.readChunks, Collections.emptyList()));
-            pendingRecord = null;
+        // 把所有未配对的 pending 强制写出
+        if (globalWriter != null) {
+            for (Map.Entry<Integer, PendingRecord> entry : pendingRecords.entrySet()) {
+                PendingRecord pr = entry.getValue();
+                globalWriter.enqueue(new TraceRecord(
+                        pr.threadId, pr.pc, pr.pcText, pr.instrText, pr.regText,
+                        pr.readChunks, Collections.emptyList()));
+            }
+            pendingRecords.clear();
         }
         if (globalWriter != null) {
             globalWriter.shutdown();
@@ -178,47 +181,52 @@ public class RegAccessPrinter {
             return;
         }
 
+        // 获取 unidbg 模拟线程 ID（协作式调度，同一 Java 线程，但 tid 不同）
+        int tid = emulator.getPid();
+
         String instrText = instruction.getMnemonic() + " " + instruction.getOpStr();
         // 只截取本次 print() 新增的寄存器文本，避免混入外部 log
         String regSnapshot = builder.substring(builderStart);
 
         if (!isWritePass) {
             // ===== 第一次 print（读寄存器）=====
-            // 如果有上一条未配对的 pending，先写出
-            if (pendingRecord != null) {
+            // 如果该线程有上一条未配对的 pending，先写出
+            PendingRecord prev = pendingRecords.get(tid);
+            if (prev != null) {
                 globalWriter.enqueue(new TraceRecord(
-                        pendingRecord.pc, pendingRecord.pcText, pendingRecord.instrText, pendingRecord.regText,
-                        pendingRecord.readChunks, Collections.emptyList()));
+                        prev.threadId, prev.pc, prev.pcText, prev.instrText, prev.regText,
+                        prev.readChunks, Collections.emptyList()));
             }
             List<MemoryChunk> readChunks = drainAccessPoints(readAccessPoints, backend);
-            pendingRecord = new PendingRecord(this.address, resolvePC(this.address), instrText,
-                    regSnapshot, readChunks);
+            pendingRecords.put(tid, new PendingRecord(tid, this.address, resolvePC(this.address), instrText,
+                    regSnapshot, readChunks));
         } else {
             // ===== 第二次 print（写寄存器）=====
-            if (pendingRecord != null) {
+            PendingRecord pending = pendingRecords.remove(tid);
+            if (pending != null) {
                 List<MemoryChunk> writeChunks = drainAccessPoints(writeAccessPoints, backend);
                 List<MemoryChunk> extraRead = drainAccessPoints(readAccessPoints, backend);
-                List<MemoryChunk> allRead = pendingRecord.readChunks;
+                List<MemoryChunk> allRead = pending.readChunks;
                 if (!extraRead.isEmpty()) {
                     allRead = new ArrayList<>(allRead);
                     allRead.addAll(extraRead);
                 }
 
-                String combinedRegText = pendingRecord.regText + regSnapshot;
+                String combinedRegText = pending.regText + regSnapshot;
 
                 globalWriter.enqueue(new TraceRecord(
-                        pendingRecord.pc,
-                        pendingRecord.pcText,
-                        pendingRecord.instrText,
+                        pending.threadId,
+                        pending.pc,
+                        pending.pcText,
+                        pending.instrText,
                         combinedRegText,
                         allRead,
                         writeChunks));
-                pendingRecord = null;
             } else {
                 // 没有 pending 却收到写 pass，单独写出
                 List<MemoryChunk> writeChunks = drainAccessPoints(writeAccessPoints, backend);
                 globalWriter.enqueue(new TraceRecord(
-                        this.address, resolvePC(this.address), instrText, regSnapshot,
+                        tid, this.address, resolvePC(this.address), instrText, regSnapshot,
                         Collections.emptyList(), writeChunks));
             }
         }
@@ -317,12 +325,14 @@ public class RegAccessPrinter {
 
     /** 暂存第一次 print 的数据 */
     static class PendingRecord {
+        final int threadId;
         final long pc;
         final String pcText;
         final String instrText;
         final String regText;
         final List<MemoryChunk> readChunks;
-        PendingRecord(long pc, String pcText, String instrText, String regText, List<MemoryChunk> readChunks) {
+        PendingRecord(int threadId, long pc, String pcText, String instrText, String regText, List<MemoryChunk> readChunks) {
+            this.threadId = threadId;
             this.pc = pc;
             this.pcText = pcText;
             this.instrText = instrText;
@@ -333,6 +343,7 @@ public class RegAccessPrinter {
 
     /** 一条完整的 trace 记录（一条指令） */
     static class TraceRecord {
+        final int threadId;
         final long pc;
         final String pcText;   // "libc.so+0x1a3b4" 或 "0x40591db0"
         final String instrText;
@@ -340,8 +351,9 @@ public class RegAccessPrinter {
         final List<MemoryChunk> readChunks;
         final List<MemoryChunk> writeChunks;
 
-        TraceRecord(long pc, String pcText, String instrText, String regText,
+        TraceRecord(int threadId, long pc, String pcText, String instrText, String regText,
                     List<MemoryChunk> readChunks, List<MemoryChunk> writeChunks) {
+            this.threadId = threadId;
             this.pc = pc;
             this.pcText = pcText;
             this.instrText = instrText;
@@ -357,6 +369,7 @@ public class RegAccessPrinter {
      * 文件格式（小端序），每条记录：
      *
      *   magic          : 4B   "UTRA"
+     *   threadId       : 4B
      *   pc             : 8B
      *   pcTextLen      : 2B
      *   pcTextBytes    : pcTextLen B   (e.g. "libc.so+0x1a3b4")
@@ -438,11 +451,12 @@ public class RegAccessPrinter {
             byte[] instrBytes = record.instrText.getBytes(StandardCharsets.UTF_8);
             byte[] regBytes = record.regText.getBytes(StandardCharsets.UTF_8);
 
-            // header: magic + pc + pcTextLen + pcText + instrLen + instr + regLen + reg + readChunkCnt
-            int headerSize = 4 + 8 + 2 + pcTextBytes.length + 2 + instrBytes.length + 2 + regBytes.length + 4;
+            // header: magic + threadId + pc + pcTextLen + pcText + instrLen + instr + regLen + reg + readChunkCnt
+            int headerSize = 4 + 4 + 8 + 2 + pcTextBytes.length + 2 + instrBytes.length + 2 + regBytes.length + 4;
             ByteBuffer header = ByteBuffer.allocate(headerSize);
             header.order(ByteOrder.LITTLE_ENDIAN);
             header.put(MAGIC);
+            header.putInt(record.threadId);
             header.putLong(record.pc);
             header.putShort((short) pcTextBytes.length);
             header.put(pcTextBytes);

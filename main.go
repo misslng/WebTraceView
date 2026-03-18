@@ -27,7 +27,7 @@ var frontendHTML []byte
 
 // ==================== 核心设计 ====================
 // 一条指令一条记录，格式：
-//   magic(4) pc(8) pcTextLen(2) pcText instrLen(2) instr regLen(2) reg
+//   magic(4) threadId(4) pc(8) pcTextLen(2) pcText instrLen(2) instr regLen(2) reg
 //   readChunkCnt(4) [base(8) len(4) data]×N
 //   writeChunkCnt(4) [base(8) len(4) data]×N
 // 第0条是 baseline，之后每条 = 一条指令
@@ -51,6 +51,14 @@ type TraceDB struct {
 	// 每条记录的调用深度
 	depths  []int16
 	depthMu sync.RWMutex
+
+	// 每条记录的线程 ID
+	tids  []int32
+	tidMu sync.RWMutex
+
+	// 所有出现过的线程 ID（去重有序）
+	tidSet   []int32
+	tidSetMu sync.RWMutex
 
 	// 函数摘要
 	funcMap map[uint64]*FuncEntry
@@ -206,6 +214,14 @@ func (db *TraceDB) buildIndexAsync() {
 		}
 		offset += 4
 
+		// 读 threadId(4)
+		var tidBuf [4]byte
+		if _, err := io.ReadFull(br, tidBuf[:]); err != nil {
+			break
+		}
+		tid := int32(binary.LittleEndian.Uint32(tidBuf[:]))
+		offset += 4
+
 		// 读 pc(8)
 		var pc uint64
 		pcBuf := make([]byte, 8)
@@ -300,6 +316,11 @@ func (db *TraceDB) buildIndexAsync() {
 		db.depths = append(db.depths, callDepth)
 		db.depthMu.Unlock()
 
+		// 记录 tid
+		db.tidMu.Lock()
+		db.tids = append(db.tids, tid)
+		db.tidMu.Unlock()
+
 		if isCall {
 			// bl 的返回地址 = pc + 4
 			retStack = append(retStack, pc+4)
@@ -372,7 +393,23 @@ func (db *TraceDB) buildIndexAsync() {
 	}
 	db.depthMu.Unlock()
 
-	log.Printf("索引完成: %d 条, %d 个锚点, 耗时 %v", count, len(db.anchors), time.Since(t0))
+	// 收集所有出现过的 tid
+	tidSeen := make(map[int32]bool)
+	db.tidMu.RLock()
+	for _, t := range db.tids {
+		tidSeen[t] = true
+	}
+	db.tidMu.RUnlock()
+	tidList := make([]int32, 0, len(tidSeen))
+	for t := range tidSeen {
+		tidList = append(tidList, t)
+	}
+	sort.Slice(tidList, func(i, j int) bool { return tidList[i] < tidList[j] })
+	db.tidSetMu.Lock()
+	db.tidSet = tidList
+	db.tidSetMu.Unlock()
+
+	log.Printf("索引完成: %d 条, %d 个锚点, %d 个线程, 耗时 %v", count, len(db.anchors), len(tidList), time.Since(t0))
 	log.Printf("调用层级: rawMin=%d, rawMax=%d, 归一化后 max=%d, final=%d",
 		minDepth, maxDepth, maxDepth-minDepth, finalDepth)
 	log.Printf("函数摘要: 共识别 %d 个不同函数", len(db.funcMap))
@@ -431,7 +468,7 @@ func (db *TraceDB) seekToRecord(idx int) int64 {
 
 	offset := a.Offset
 	cur := a.RecordIdx
-	buf := make([]byte, 16)
+	buf := make([]byte, 18)
 	for cur < idx {
 		next := skipRecordFile(f, offset, buf)
 		if next <= offset {
@@ -443,15 +480,15 @@ func (db *TraceDB) seekToRecord(idx int) int64 {
 	return offset
 }
 
-// skipRecordFile 跳过一条完整记录（新格式：pcText + instrText + regText + readChunks + writeChunks）
+// skipRecordFile 跳过一条完整记录（新格式：threadId + pcText + instrText + regText + readChunks + writeChunks）
 func skipRecordFile(f *os.File, offset int64, buf []byte) int64 {
-	if _, err := f.ReadAt(buf[:14], offset); err != nil {
+	if _, err := f.ReadAt(buf[:18], offset); err != nil {
 		return offset
 	}
-	p := offset + 4 + 8 // skip magic + pc
+	p := offset + 4 + 4 + 8 // skip magic + threadId + pc
 
 	// skip pcText
-	pcTextLen := int64(binary.LittleEndian.Uint16(buf[12:14]))
+	pcTextLen := int64(binary.LittleEndian.Uint16(buf[16:18]))
 	p += 2 + pcTextLen
 
 	// read instrLen
@@ -499,6 +536,7 @@ func skipChunkGroupFile(f *os.File, p int64, buf []byte) int64 {
 // ==================== 按需读取 ====================
 
 type InstrInfo struct {
+	ThreadId   int32
 	PC         uint64
 	PCText     string // "libc.so+0x1a3b4" 或 "0x..."
 	InstrText  string
@@ -508,16 +546,17 @@ type InstrInfo struct {
 }
 
 func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
-	hdr := make([]byte, 14)
+	hdr := make([]byte, 18)
 	if _, err := f.ReadAt(hdr, offset); err != nil {
 		return nil, err
 	}
 	if string(hdr[:4]) != "UTRA" {
 		return nil, fmt.Errorf("invalid magic")
 	}
-	pc := binary.LittleEndian.Uint64(hdr[4:12])
-	pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
-	p := offset + 14
+	threadId := int32(binary.LittleEndian.Uint32(hdr[4:8]))
+	pc := binary.LittleEndian.Uint64(hdr[8:16])
+	pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
+	p := offset + 18
 
 	pcTextBuf := make([]byte, pcTextLen)
 	if _, err := f.ReadAt(pcTextBuf, p); err != nil {
@@ -585,7 +624,7 @@ func readInstrAt(f *os.File, offset int64) (*InstrInfo, error) {
 	}
 
 	return &InstrInfo{
-		PC: pc, PCText: string(pcTextBuf), InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
+		ThreadId: threadId, PC: pc, PCText: string(pcTextBuf), InstrText: string(instrBuf), RegText: string(regBuf), MemFlag: memFlag, NextOffset: p,
 	}, nil
 }
 
@@ -596,12 +635,12 @@ type MemChunk struct {
 
 // readChunksFromFile 读取一条记录的 readChunks + writeChunks
 func readChunksFromFile(f *os.File, offset int64) (readChunks, writeChunks []MemChunk, err error) {
-	hdr := make([]byte, 14)
+	hdr := make([]byte, 18)
 	if _, err = f.ReadAt(hdr, offset); err != nil {
 		return
 	}
-	pcTextLen := int64(binary.LittleEndian.Uint16(hdr[12:14]))
-	p := offset + 14 + pcTextLen
+	pcTextLen := int64(binary.LittleEndian.Uint16(hdr[16:18]))
+	p := offset + 18 + pcTextLen
 
 	// read instrLen
 	ilBuf := make([]byte, 2)
@@ -656,16 +695,26 @@ func readChunkGroup(f *os.File, p int64) ([]MemChunk, int64, error) {
 // ==================== HTTP Handlers ====================
 
 func handleInfo(w http.ResponseWriter, r *http.Request) {
+	db.tidSetMu.RLock()
+	tids := db.tidSet
+	db.tidSetMu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"totalRecords": db.totalRecs.Load(),
 		"indexDone":    db.indexDone.Load(),
+		"threadIds":    tids,
 	})
 }
 
 func handleInstructions(w http.ResponseWriter, r *http.Request) {
 	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	tidFilter := int32(-1)
+	if tidStr := r.URL.Query().Get("tid"); tidStr != "" {
+		if v, err := strconv.Atoi(tidStr); err == nil {
+			tidFilter = int32(v)
+		}
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
@@ -674,6 +723,86 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := int(db.totalRecs.Load())
+
+	if tidFilter >= 0 {
+		// tid 过滤模式：off/limit 是过滤后的逻辑偏移
+		// 先从 tids 数组中找出属于该 tid 的记录索引
+		db.tidMu.RLock()
+		allTids := db.tids
+		db.tidMu.RUnlock()
+
+		// 收集匹配的全局索引
+		var matched []int
+		for i, t := range allTids {
+			if t == tidFilter {
+				matched = append(matched, i)
+			}
+		}
+		filteredTotal := len(matched)
+		end := off + limit
+		if end > filteredTotal {
+			end = filteredTotal
+		}
+		if off >= filteredTotal {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"offset": off, "limit": limit, "total": filteredTotal, "items": []interface{}{}, "tid": tidFilter,
+			})
+			return
+		}
+
+		f := db.getFile()
+		if f == nil {
+			http.Error(w, "文件打开失败", 500)
+			return
+		}
+		defer db.putFile(f)
+
+		type Item struct {
+			Index    int    `json:"index"`
+			PC       string `json:"pc"`
+			Instr    string `json:"instrText"`
+			Regs     string `json:"regText"`
+			Depth    int    `json:"depth"`
+			MemFlag  string `json:"memFlag,omitempty"`
+			ThreadId int32  `json:"threadId"`
+		}
+
+		items := make([]Item, 0, end-off)
+		for _, globalIdx := range matched[off:end] {
+			fileOff := db.seekToRecord(globalIdx)
+			if fileOff < 0 {
+				continue
+			}
+			info, err := readInstrAt(f, fileOff)
+			if err != nil {
+				continue
+			}
+			depth := 0
+			db.depthMu.RLock()
+			if globalIdx < len(db.depths) {
+				depth = int(db.depths[globalIdx])
+			}
+			db.depthMu.RUnlock()
+			items = append(items, Item{
+				Index:    globalIdx,
+				PC:       info.PCText,
+				Instr:    info.InstrText,
+				Regs:     info.RegText,
+				Depth:    depth,
+				MemFlag:  info.MemFlag,
+				ThreadId: info.ThreadId,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"offset": off, "limit": limit, "total": filteredTotal, "items": items, "tid": tidFilter,
+		})
+		return
+	}
+
+	// 无过滤模式（原逻辑）
 	end := off + limit
 	if end > total {
 		end = total
@@ -700,12 +829,13 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 	defer db.putFile(f)
 
 	type Item struct {
-		Index   int    `json:"index"`
-		PC      string `json:"pc"`
-		Instr   string `json:"instrText"`
-		Regs    string `json:"regText"`
-		Depth   int    `json:"depth"`
-		MemFlag string `json:"memFlag,omitempty"`
+		Index    int    `json:"index"`
+		PC       string `json:"pc"`
+		Instr    string `json:"instrText"`
+		Regs     string `json:"regText"`
+		Depth    int    `json:"depth"`
+		MemFlag  string `json:"memFlag,omitempty"`
+		ThreadId int32  `json:"threadId"`
 	}
 
 	items := make([]Item, 0, end-off)
@@ -721,12 +851,13 @@ func handleInstructions(w http.ResponseWriter, r *http.Request) {
 		}
 		db.depthMu.RUnlock()
 		items = append(items, Item{
-			Index:   i,
-			PC:      info.PCText,
-			Instr:   info.InstrText,
-			Regs:    info.RegText,
-			Depth:   depth,
-			MemFlag: info.MemFlag,
+			Index:    i,
+			PC:       info.PCText,
+			Instr:    info.InstrText,
+			Regs:     info.RegText,
+			Depth:    depth,
+			MemFlag:  info.MemFlag,
+			ThreadId: info.ThreadId,
 		})
 		fileOff = info.NextOffset
 	}
@@ -1007,7 +1138,7 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 
 	// 复用缓冲区减少 GC
 	instrBuf := make([]byte, 0, 256)
-	hdr := make([]byte, 14)
+	hdr := make([]byte, 18)
 
 	for idx < endIdx {
 		select {
@@ -1016,15 +1147,15 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 		default:
 		}
 
-		// 读 magic + pc + instrLen (14 bytes)
+		// 读 magic(4) + threadId(4) + pc(8) + pcTextLen(2) = 18 bytes
 		if _, err := io.ReadFull(br, hdr); err != nil {
 			return local
 		}
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
-		// hdr[4:12] = pc (unused), hdr[12:14] = pcTextLen
-		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		// hdr[4:8] = threadId (unused here), hdr[8:16] = pc (unused), hdr[16:18] = pcTextLen
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
@@ -1340,7 +1471,7 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 	}
 
 	br := bufio.NewReaderSize(f, 8*1024*1024)
-	hdr := make([]byte, 14)
+	hdr := make([]byte, 18)
 	idx := startIdx
 	instrBuf := make([]byte, 0, 256)
 	regBuf := make([]byte, 0, 512)
@@ -1359,8 +1490,8 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 			return local
 		}
 
-		// hdr[12:14] = pcTextLen
-		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		// hdr[16:18] = pcTextLen
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
@@ -1656,7 +1787,7 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		return local
 	}
 	br := bufio.NewReaderSize(f, 8*1024*1024)
-	hdr := make([]byte, 14)
+	hdr := make([]byte, 18)
 	idx := startIdx
 	wLo, wHi := job.addr, job.addr+job.size
 
@@ -1672,7 +1803,7 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		if string(hdr[:4]) != "UTRA" {
 			return local
 		}
-		pcTextLen := int(binary.LittleEndian.Uint16(hdr[12:14]))
+		pcTextLen := int(binary.LittleEndian.Uint16(hdr[16:18]))
 		pcTextBuf := make([]byte, pcTextLen)
 		if _, err := io.ReadFull(br, pcTextBuf); err != nil {
 			return local
@@ -1916,8 +2047,8 @@ func runRegTrace(ctx context.Context, job *RegTraceJob) {
 		if string(magic) != "UTRA" {
 			return
 		}
-		// skip pc(8), read pcText
-		io.CopyN(io.Discard, br, 8)
+		// skip threadId(4) + pc(8), read pcText
+		io.CopyN(io.Discard, br, 12)
 		var pcTextLen uint16
 		binary.Read(br, binary.LittleEndian, &pcTextLen)
 		pcTextBuf := make([]byte, pcTextLen)

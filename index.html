@@ -18,6 +18,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .header .indexing { color: #dcdcaa; animation: pulse 1s infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
 .header input { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 4px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; }
+.header select#tidFilter { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 4px 6px; font-size: 12px; font-family: inherit; border-radius: 3px; }
 .pager { display: flex; align-items: center; gap: 6px; }
 .pager button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 3px 10px; font-size: 12px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 .pager button:hover:not(:disabled) { background: #505050; }
@@ -45,6 +46,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .instr-row.selected { background: #094771; }
 .instr-row .idx { color: #858585; width: 70px; flex-shrink: 0; text-align: right; padding-right: 12px; }
 .instr-row .pc { color: #4ec9b0; width: 270px; flex-shrink: 0; }
+.instr-row .tid { color: #d19a66; width: 50px; flex-shrink: 0; font-size: 0.85em; opacity: 0.8; }
 .instr-row .asm { color: #dcdcaa; width: 200px; flex-shrink: 0; }
 .instr-row .asm.call-instr { color: #569cd6; }
 .instr-row .asm.ret-instr { color: #c586c0; }
@@ -182,6 +184,9 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
   </div>
   <input type="text" id="gotoBox" placeholder="跳转行号..." style="width:100px">
   <input type="text" id="gotoPage" placeholder="跳转页码..." style="width:100px">
+  <span style="color:#555">│</span>
+  <select id="tidFilter" title="线程过滤"><option value="">全部线程</option></select>
+  <button class="nav-btn" id="btnTidRestore" title="恢复之前的线程过滤" style="display:none;color:#d19a66;font-size:11px">↩ 恢复T?</button>
   <span style="color:#555">│</span>
   <button class="nav-btn" id="btnNavBack" title="后退 (Alt+Left)" disabled>⬅</button>
   <button class="nav-btn" id="btnNavForward" title="前进 (Alt+Right)" disabled>➡</button>
@@ -371,6 +376,8 @@ let pollTimer = null;
 let minPageInView = 0;
 let hlAddr = -1, hlSize = 0;  // 高亮范围
 let lastRegions = null;       // 缓存当前显示的 regions
+let currentTidFilter = '';    // 当前 tid 过滤（空=全部）
+let prevTidFilter = '';       // 跳转前暂存的 tid 过滤，用于恢复
 
 // ==================== 导航历史 ====================
 let navHistory = [];
@@ -586,6 +593,7 @@ function collectSession() {
     // 跳转框
     gotoBox: document.getElementById('gotoBox').value,
     gotoPage: document.getElementById('gotoPage').value,
+    tidFilter: currentTidFilter,
     // 滚动位置
     scrollTop: container.scrollTop,
     // 时间线面板是否打开
@@ -687,6 +695,12 @@ async function restoreSession(session) {
     hlSize = session.hlSize || 0;
   }
 
+  // 恢复 tid 过滤
+  if (session.tidFilter) {
+    currentTidFilter = session.tidFilter;
+    document.getElementById('tidFilter').value = session.tidFilter;
+  }
+
   // 恢复页码和选中行
   if (typeof session.selectedIdx === 'number' && session.selectedIdx >= 0) {
     selectedIdx = session.selectedIdx;
@@ -736,6 +750,29 @@ async function init() {
   document.getElementById('btnPrev').addEventListener('click', () => gotoPage(currentPage - 1));
   document.getElementById('btnNext').addEventListener('click', () => gotoPage(currentPage + 1));
   document.getElementById('btnLast').addEventListener('click', () => gotoPage(totalPages - 1));
+
+  // tid 过滤
+  document.getElementById('tidFilter').addEventListener('change', e => {
+    currentTidFilter = e.target.value;
+    prevTidFilter = '';
+    document.getElementById('btnTidRestore').style.display = 'none';
+    currentPage = 0;
+    minPageInView = 0;
+    gotoPage(0);
+  });
+
+  // tid 恢复按钮
+  document.getElementById('btnTidRestore').addEventListener('click', () => {
+    if (prevTidFilter) {
+      currentTidFilter = prevTidFilter;
+      document.getElementById('tidFilter').value = prevTidFilter;
+      prevTidFilter = '';
+      document.getElementById('btnTidRestore').style.display = 'none';
+      currentPage = 0;
+      minPageInView = 0;
+      gotoPage(0);
+    }
+  });
 
   // 滚到底自动下一页，滚到顶自动上一页
   container.addEventListener('scroll', () => {
@@ -1015,6 +1052,19 @@ async function refreshInfo() {
       el.textContent = '索引中... ' + totalRecords.toLocaleString() + ' 条';
       document.getElementById('indexStatus').textContent = '后台索引构建中...';
     }
+    // 更新 tid 下拉框
+    const tidSelect = document.getElementById('tidFilter');
+    const tids = info.threadIds || [];
+    if (tids.length > 1 && tidSelect.options.length <= 1) {
+      for (const t of tids) {
+        const opt = document.createElement('option');
+        opt.value = t;
+        opt.textContent = 'T' + t;
+        tidSelect.appendChild(opt);
+      }
+    }
+    // 只有一个线程时隐藏选择器
+    tidSelect.style.display = tids.length > 1 ? '' : 'none';
     updatePagerUI();
   } catch(e) {}
 }
@@ -1051,7 +1101,9 @@ async function loadPage(page, mode) {
   document.getElementById('statusBar').textContent = '加载第 ' + (page + 1) + ' 页...';
 
   try {
-    const data = await fetchJSON('/api/instructions?offset=' + offset + '&limit=' + limit);
+    let url = '/api/instructions?offset=' + offset + '&limit=' + limit;
+    if (currentTidFilter !== '') url += '&tid=' + currentTidFilter;
+    const data = await fetchJSON(url);
     pageItems = data.items || [];
     totalRecords = data.total;
     totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE));
@@ -1059,7 +1111,8 @@ async function loadPage(page, mode) {
     updatePagerUI();
     document.getElementById('statusBar').textContent =
       '行 ' + (minPageInView * PAGE_SIZE) + '-' + (offset + pageItems.length - 1) +
-      '，共 ' + totalRecords.toLocaleString() + ' 条';
+      '，共 ' + totalRecords.toLocaleString() + ' 条' +
+      (currentTidFilter !== '' ? ' (线程 T' + currentTidFilter + ')' : '');
   } catch(e) {
     document.getElementById('statusBar').textContent = '加载失败';
   }
@@ -1071,7 +1124,9 @@ async function loadPagePrepend(page) {
   loading = true;
   const offset = page * PAGE_SIZE;
   try {
-    const data = await fetchJSON('/api/instructions?offset=' + offset + '&limit=' + PAGE_SIZE);
+    let url = '/api/instructions?offset=' + offset + '&limit=' + PAGE_SIZE;
+    if (currentTidFilter !== '') url += '&tid=' + currentTidFilter;
+    const data = await fetchJSON(url);
     const items = data.items || [];
     if (items.length === 0) { loading = false; return; }
 
@@ -1119,9 +1174,11 @@ function renderInstrRow(item, sel) {
     }
   }
 
+  const tidTag = item.threadId ? '<span class="tid">T' + item.threadId + '</span>' : '';
   return '<div class="instr-row' + sel + '" data-idx="' + item.index + '">'
     + '<span class="bm-icon">' + bmIcon + '</span>'
     + '<span class="idx">' + item.index + '</span>'
+    + tidTag
     + '<span class="depth-bar">' + indent + '</span>'
     + '<span class="pc">' + item.pc + '</span>'
     + '<span class="asm' + asmClass + '">' + marker + escHtml(item.instrText) + fnLabel + '</span>'
@@ -1319,6 +1376,21 @@ async function pollInstrSearchResults() {
 
 async function jumpToInstr(idx) {
   navPush(idx);
+  // 如果有 tid 过滤，检查目标行是否属于当前过滤的线程
+  if (currentTidFilter !== '') {
+    let targetTid = -1;
+    db_tidMu: {
+      // 快速检查：从 tids 数组判断（后端已在 /api/instructions 返回 threadId）
+      // 这里无法直接知道目标 tid，先临时切到全部线程跳过去
+      prevTidFilter = currentTidFilter;
+      currentTidFilter = '';
+      document.getElementById('tidFilter').value = '';
+      // 显示恢复按钮
+      const restoreBtn = document.getElementById('btnTidRestore');
+      restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
+      restoreBtn.style.display = '';
+    }
+  }
   const page = Math.floor(idx / PAGE_SIZE);
   await gotoPage(page);
   const row = container.querySelector('[data-idx="' + idx + '"]');
