@@ -8,12 +8,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// waitForSearchDone polls until a search job is done or timeout (5 min).
+// waitForDone polls until isDone returns true or timeout.
 func waitForDone(isDone func() bool, timeout time.Duration) bool {
 	deadline := time.After(timeout)
 	for {
@@ -27,6 +28,12 @@ func waitForDone(isDone func() bool, timeout time.Duration) bool {
 		}
 	}
 }
+
+// MCP-private watchpoint job (independent from Web UI's wpJob)
+var (
+	mcpWpJob   *WatchpointJob
+	mcpWpJobMu sync.Mutex
+)
 
 // ==================== Tool: search_memory ====================
 
@@ -59,28 +66,21 @@ func handleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		}
 	}
 
-	// Start search (reuse existing global search mechanism)
-	currentSearchMu.Lock()
-	if currentSearch != nil && currentSearch.cancel != nil {
-		currentSearch.cancel()
-	}
+	// Independent job — does NOT touch global currentSearch
 	searchCtx, cancel := context.WithCancel(context.Background())
 	job := &SearchJob{
 		id:      fmt.Sprintf("mcp_%d", time.Now().UnixNano()),
 		pattern: pattern,
 		cancel:  cancel,
 	}
-	currentSearch = job
-	currentSearchMu.Unlock()
 
 	go runSearch(searchCtx, job)
 
-	// Wait for completion
 	if !waitForDone(func() bool { return job.done.Load() }, 5*time.Minute) {
+		cancel()
 		return mcpErr("搜索超时（5分钟）")
 	}
 
-	// Return paginated results
 	job.mu.Lock()
 	total := len(job.matches)
 	end := off + limit
@@ -117,22 +117,18 @@ func handleSearchInstructions(ctx context.Context, req mcp.CallToolRequest) (*mc
 		limit = 50
 	}
 
-	instrSearchMu.Lock()
-	if instrSearch != nil && instrSearch.cancel != nil {
-		instrSearch.cancel()
-	}
+	// Independent job — does NOT touch global instrSearch
 	searchCtx, cancel := context.WithCancel(context.Background())
 	job := &InstrSearchJob{
 		id:      fmt.Sprintf("mcp_%d", time.Now().UnixNano()),
 		keyword: strings.ToLower(keyword),
 		cancel:  cancel,
 	}
-	instrSearch = job
-	instrSearchMu.Unlock()
 
 	go runInstrSearch(searchCtx, job)
 
 	if !waitForDone(func() bool { return job.done.Load() }, 5*time.Minute) {
+		cancel()
 		return mcpErr("搜索超时（5分钟）")
 	}
 
@@ -175,20 +171,24 @@ func handleSetWatchpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		return mcpErr("invalid addr or size")
 	}
 
-	wpJobMu.Lock()
-	if wpJob != nil && wpJob.cancel != nil {
-		wpJob.cancel()
-	}
+	// Independent job — does NOT touch global wpJob
 	wpCtx, cancel := context.WithCancel(context.Background())
 	job := &WatchpointJob{
 		id: fmt.Sprintf("mcp_%d", time.Now().UnixNano()), addr: addr, size: uint64(size), cancel: cancel,
 	}
-	wpJob = job
-	wpJobMu.Unlock()
+
+	// Save to MCP-private variable for traceback
+	mcpWpJobMu.Lock()
+	if mcpWpJob != nil && mcpWpJob.cancel != nil {
+		mcpWpJob.cancel()
+	}
+	mcpWpJob = job
+	mcpWpJobMu.Unlock()
 
 	go runWatchpoint(wpCtx, job)
 
 	if !waitForDone(func() bool { return job.done.Load() }, 5*time.Minute) {
+		cancel()
 		return mcpErr("监控点搜索超时（5分钟）")
 	}
 
@@ -229,23 +229,21 @@ func handleWatchpointTraceback(ctx context.Context, req mcp.CallToolRequest) (*m
 		limit = 50
 	}
 
-	// Get current watchpoint job
-	wpJobMu.Lock()
-	job := wpJob
-	wpJobMu.Unlock()
+	// Use MCP-private watchpoint job
+	mcpWpJobMu.Lock()
+	job := mcpWpJob
+	mcpWpJobMu.Unlock()
 
 	if job == nil {
 		return mcpErr("没有活跃的监控点，请先调用 set_watchpoint")
 	}
 
-	// Wait if still running
 	if !job.done.Load() {
 		if !waitForDone(func() bool { return job.done.Load() }, 5*time.Minute) {
 			return mcpErr("监控点搜索超时")
 		}
 	}
 
-	// Filter: index < beforeIndex, optional type filter, then reverse sort
 	job.mu.Lock()
 	var filtered []WatchpointMatch
 	for _, m := range job.matches {
@@ -262,7 +260,6 @@ func handleWatchpointTraceback(ctx context.Context, req mcp.CallToolRequest) (*m
 	}
 	job.mu.Unlock()
 
-	// Sort descending by index (nearest first)
 	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Index > filtered[j].Index })
 
 	total := len(filtered)
@@ -301,21 +298,17 @@ func handleTraceRegister(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		limit = 200
 	}
 
-	regJobMu.Lock()
-	if regJob != nil && regJob.cancel != nil {
-		regJob.cancel()
-	}
+	// Independent job — does NOT touch global regJob
 	regCtx, cancel := context.WithCancel(context.Background())
 	job := &RegTraceJob{
 		id: fmt.Sprintf("mcp_%d", time.Now().UnixNano()), reg: strings.ToLower(reg), cancel: cancel,
 		from: from, to: to,
 	}
-	regJob = job
-	regJobMu.Unlock()
 
 	go runRegTrace(regCtx, job)
 
 	if !waitForDone(func() bool { return job.done.Load() }, 5*time.Minute) {
+		cancel()
 		return mcpErr("寄存器追踪超时（5分钟）")
 	}
 
