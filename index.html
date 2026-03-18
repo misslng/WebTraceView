@@ -34,7 +34,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .isr-row { padding: 3px 8px; font-size: 11px; cursor: pointer; display: flex; gap: 8px; border-bottom: 1px solid #2a2a2a; white-space: nowrap; }
 .isr-row:hover { background: #264f78; }
 .isr-row .isr-idx { color: #858585; width: 60px; flex-shrink: 0; }
-.isr-row .isr-pc { color: #4ec9b0; width: 150px; flex-shrink: 0; }
+.isr-row .isr-pc { color: #4ec9b0; width: 225px; flex-shrink: 0; }
 .isr-row .isr-instr { color: #dcdcaa; width: 180px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; }
 .isr-row .isr-regs { color: #9cdcfe; flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .mem-panel { width: 45%; display: flex; flex-direction: column; }
@@ -44,7 +44,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .instr-row:hover { background: #264f78; }
 .instr-row.selected { background: #094771; }
 .instr-row .idx { color: #858585; width: 70px; flex-shrink: 0; text-align: right; padding-right: 12px; }
-.instr-row .pc { color: #4ec9b0; width: 180px; flex-shrink: 0; }
+.instr-row .pc { color: #4ec9b0; width: 270px; flex-shrink: 0; }
 .instr-row .asm { color: #dcdcaa; width: 200px; flex-shrink: 0; }
 .instr-row .asm.call-instr { color: #569cd6; }
 .instr-row .asm.ret-instr { color: #c586c0; }
@@ -83,7 +83,7 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .search-result-row { padding: 3px 8px; font-size: 11px; cursor: pointer; display: flex; gap: 10px; border-bottom: 1px solid #2a2a2a; }
 .search-result-row:hover { background: #264f78; }
 .search-result-row .sr-idx { color: #858585; width: 60px; flex-shrink: 0; }
-.search-result-row .sr-pc { color: #4ec9b0; width: 150px; flex-shrink: 0; }
+.search-result-row .sr-pc { color: #4ec9b0; width: 225px; flex-shrink: 0; }
 .search-result-row .sr-instr { color: #dcdcaa; width: 160px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-result-row .sr-addr { color: #ce9178; width: 100px; flex-shrink: 0; }
 .search-result-row .sr-type { width: 30px; flex-shrink: 0; }
@@ -765,11 +765,7 @@ async function init() {
     if (e.key === 'Enter') {
       const line = parseInt(e.target.value);
       if (!isNaN(line) && line >= 0 && line < totalRecords) {
-        const page = Math.floor(line / PAGE_SIZE);
-        gotoPage(page).then(() => {
-          const row = container.querySelector('[data-idx="' + line + '"]');
-          if (row) row.scrollIntoView({ block: 'center' });
-        });
+        jumpToInstr(line);
         e.target.value = '';
       }
     }
