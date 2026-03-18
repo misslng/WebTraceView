@@ -1055,7 +1055,7 @@ async function refreshInfo() {
     // 更新 tid 下拉框
     const tidSelect = document.getElementById('tidFilter');
     const tids = info.threadIds || [];
-    if (tids.length > 1 && tidSelect.options.length <= 1) {
+    if (tids.length > 0 && tidSelect.options.length <= 1) {
       for (const t of tids) {
         const opt = document.createElement('option');
         opt.value = t;
@@ -1063,8 +1063,8 @@ async function refreshInfo() {
         tidSelect.appendChild(opt);
       }
     }
-    // 只有一个线程时隐藏选择器
-    tidSelect.style.display = tids.length > 1 ? '' : 'none';
+    // 只有0个线程时隐藏选择器（正常情况至少有1个）
+    tidSelect.style.display = tids.length > 0 ? '' : 'none';
     updatePagerUI();
   } catch(e) {}
 }
