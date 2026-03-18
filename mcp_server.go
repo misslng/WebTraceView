@@ -51,7 +51,7 @@ func setupMCP() http.Handler {
 	), handleSearchMemory)
 
 	s.AddTool(mcp.NewTool("search_instructions",
-		mcp.WithDescription("在 trace 所有指令的 PC 地址文本、汇编指令文本、寄存器状态文本中搜索关键词（大小写不敏感）。用于定位特定指令模式，如搜索 aes 找加密相关指令，搜索 bl 0x40001000 找特定函数调用。结果按行号升序排列。警告：请使用尽可能具体的关键词！模糊搜索如 mov 或 ldr 会命中成千上万条结果，严重浪费 token。建议搭配完整的操作数搜索（如 movz w9, #0xa1 而非 movz），或搜索特定地址/符号名（如 libmain.so+0x5bc04）。"),
+		mcp.WithDescription("在 trace 所有指令的 PC 地址文本、汇编指令文本、寄存器状态文本中搜索关键词（大小写不敏感）。用于定位特定指令模式，如搜索 aes 找加密相关指令，搜索 bl 0x40001000 找特定函数调用。结果按行号升序排列。警告：请使用尽可能具体的关键词！模糊搜索如 mov 或 ldr 会命中成千上万条结果，严重浪费 token。建议搜索完整的指令+寄存器信息（如 'mov x0, x25 => x0=0x12345678' 而非 'mov x0, x25'），或搜索特定地址/符号名（如 'libmain.so+0x5bc04'）。每条记录的完整文本包含：PC地址文本 + 汇编指令 + 寄存器状态（含 => 后的写回值），三者都会被搜索匹配。越具体的关键词命中越精准。"),
 		mcp.WithString("keyword", mcp.Required(), mcp.Description("搜索关键词")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),
 		mcp.WithNumber("limit", mcp.Description("结果分页大小，默认 50，最大 200")),
