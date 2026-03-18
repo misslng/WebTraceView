@@ -2008,8 +2008,26 @@ const wpPR = new PagedResults({
       + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span>'
       + strPreview + '</div>';
   },
-  onClickRow: (row) => { jumpToInstr(parseInt(row.dataset.idx)); }
+  onClickRow: (row) => { wpJumpWithHighlight(parseInt(row.dataset.idx)); }
 });
+
+/** 监控点结果点击：跳转到指令并高亮监控地址 */
+async function wpJumpWithHighlight(idx) {
+  const addrStr = document.getElementById('wpAddr').value.trim();
+  const size = parseInt(document.getElementById('wpSize').value) || 8;
+  if (addrStr) {
+    hlAddr = parseInt(addrStr, 16);
+    hlSize = size;
+    document.getElementById('hlAddr').value = addrStr;
+    document.getElementById('hlSize').value = size;
+  }
+  await jumpToInstr(idx);
+  // 跳转后滚动到高亮位置
+  setTimeout(() => {
+    const hlEl = document.querySelector('.hex-bytes .hl');
+    if (hlEl) hlEl.scrollIntoView({ block: 'center' });
+  }, 100);
+}
 
 document.getElementById('btnWatchpoint').addEventListener('click', async () => {
   const addr = document.getElementById('wpAddr').value.trim();
@@ -2164,10 +2182,10 @@ async function pollWpResults() {
     }
   }
 
-  // 点击回溯结果行跳转
+  // 点击回溯结果行跳转（带监控地址高亮）
   document.getElementById('wpTraceList').addEventListener('click', function(e) {
     const row = e.target.closest('.search-result-row');
-    if (row) jumpToInstr(parseInt(row.dataset.idx));
+    if (row) wpJumpWithHighlight(parseInt(row.dataset.idx));
   });
 })();
 
