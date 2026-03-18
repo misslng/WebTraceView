@@ -94,6 +94,25 @@ func handleGetInstructions(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		off = 0
 	}
 
+	// Center mode: convert center + context_size to offset + limit
+	if args := req.GetArguments(); args != nil {
+		if _, ok := args["center"]; ok {
+			center := req.GetInt("center", 0)
+			ctxSize := req.GetInt("context_size", 20)
+			if ctxSize <= 0 {
+				ctxSize = 20
+			}
+			off = center - ctxSize
+			if off < 0 {
+				off = 0
+			}
+			limit = ctxSize*2 + 1
+			if limit > 500 {
+				limit = 500
+			}
+		}
+	}
+
 	tidFilter := int32(-1)
 	if args := req.GetArguments(); args != nil {
 		if _, ok := args["tid"]; ok {

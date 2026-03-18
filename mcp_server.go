@@ -25,10 +25,15 @@ func setupMCP() http.Handler {
 
 	s.AddTool(mcp.NewTool("get_instructions",
 		mcp.WithDescription(`分页获取 trace 中的 ARM 指令列表，支持按线程 ID 过滤。
-每条指令包含：全局行号 index、线程 ID、PC 地址（格式 "(0x绝对地址)SO名+偏移"）、汇编文本、寄存器状态（"输入寄存器=值 => 写回寄存器=新值"）、depth（函数调用嵌套深度，0=入口层级，进入子函数+1）、memFlag（""=无内存访问, "R"=读, "W"=写, "RW"=读写）。`),
-		mcp.WithNumber("offset", mcp.Required(), mcp.Description("起始位置（行号偏移），从 0 开始")),
-		mcp.WithNumber("limit", mcp.Description("返回条数，默认 100，最大 500")),
-		mcp.WithNumber("tid", mcp.Description("线程 ID 过滤，不传则返回所有线程。传入后 offset 是该线程内的偏移")),
+每条指令包含：全局行号 index、线程 ID、PC 地址（格式 "(0x绝对地址)SO名+偏移"）、汇编文本、寄存器状态（"输入寄存器=值 => 写回寄存器=新值"）、depth（函数调用嵌套深度，0=入口层级，进入子函数+1）、memFlag（""=无内存访问, "R"=读, "W"=写, "RW"=读写）。
+支持两种用法：
+1. 分页模式：传 offset + limit，从指定位置顺序获取
+2. 上下文模式：传 center + context_size，获取指定行号前后各 context_size 行的指令（适合查看某条指令的执行上下文）`),
+		mcp.WithNumber("offset", mcp.Description("分页模式：起始位置（行号偏移），从 0 开始")),
+		mcp.WithNumber("limit", mcp.Description("分页模式：返回条数，默认 100，最大 500")),
+		mcp.WithNumber("center", mcp.Description("上下文模式：目标行号，会返回该行前后各 context_size 行的指令")),
+		mcp.WithNumber("context_size", mcp.Description("上下文模式：前后各取多少行，默认 20")),
+		mcp.WithNumber("tid", mcp.Description("线程 ID 过滤，不传则返回所有线程")),
 	), handleGetInstructions)
 
 	s.AddTool(mcp.NewTool("get_memory",
