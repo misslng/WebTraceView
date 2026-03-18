@@ -1293,21 +1293,14 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, 
 			return local
 		}
 
-		// 实际访问的中心区域：去掉两侧各 128 字节的窗口
-		centerStart := dataLen / 2
-		accessSize := dataLen - 256
+		// 实际访问区域：固定窗口 = 前128 + 后128，实际操作从 offset 128 开始
+		const windowSize = 256
+		accessSize := dataLen - windowSize
 		if accessSize < 1 {
 			accessSize = 1
 		}
-		halfAccess := accessSize / 2
-		if halfAccess < 2 {
-			halfAccess = 2
-		}
-		centerLo := centerStart - halfAccess
-		centerHi := centerStart + halfAccess
-		if centerLo < 0 {
-			centerLo = 0
-		}
+		centerLo := windowSize / 2
+		centerHi := centerLo + accessSize
 		if centerHi > dataLen {
 			centerHi = dataLen
 		}
@@ -1914,21 +1907,14 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pcText string,
 		base := binary.LittleEndian.Uint64(hdr[:8])
 		dataLen := int(binary.LittleEndian.Uint32(hdr[8:12]))
 
-		// 计算实际访问的中心区域（去掉两侧各 128 字节窗口）
-		centerStart := dataLen / 2
-		accessSize := dataLen - 256
+		// 实际访问区域：固定窗口 = 前128 + 后128，实际操作从 offset 128 开始
+		const windowSize = 256
+		accessSize := dataLen - windowSize
 		if accessSize < 1 {
 			accessSize = 1
 		}
-		halfAccess := accessSize / 2
-		if halfAccess < 2 {
-			halfAccess = 2
-		}
-		centerLoOff := centerStart - halfAccess
-		centerHiOff := centerStart + halfAccess
-		if centerLoOff < 0 {
-			centerLoOff = 0
-		}
+		centerLoOff := windowSize / 2
+		centerHiOff := centerLoOff + accessSize
 		if centerHiOff > dataLen {
 			centerHiOff = dataLen
 		}
