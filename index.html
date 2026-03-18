@@ -1452,7 +1452,7 @@ function PagedResults(opts) {
   this.el.appendChild(this.pagerEl);
 
   this.listEl.addEventListener('click', (e) => {
-    const row = e.target.closest('.search-result-row');
+    const row = e.target.closest('.search-result-row') || e.target.closest('.isr-row');
     if (row && this.onClickRow) this.onClickRow(row);
   });
 
@@ -1783,6 +1783,16 @@ async function jumpToSearchResult(idx, addrStr, patternLen) {
   hlSize = patternLen;
   document.getElementById('hlAddr').value = addrStr;
   document.getElementById('hlSize').value = patternLen;
+  // 如果有 tid 过滤，临时切到全部线程视图
+  if (currentTidFilter !== '') {
+    prevTidFilter = currentTidFilter;
+    currentTidFilter = '';
+    document.getElementById('tidFilter').value = '';
+    totalPages = Math.max(totalPages, Math.ceil((idx + 1) / PAGE_SIZE) + 1);
+    const restoreBtn = document.getElementById('btnTidRestore');
+    restoreBtn.textContent = '↩ 恢复 T' + prevTidFilter;
+    restoreBtn.style.display = '';
+  }
   const page = Math.floor(idx / PAGE_SIZE);
   await gotoPage(page);
   const row = container.querySelector('[data-idx="' + idx + '"]');
