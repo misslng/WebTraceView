@@ -73,12 +73,12 @@ func setupMCP() http.Handler {
 	), handleSearchInstructions)
 
 	s.AddTool(mcp.NewTool("set_watchpoint",
-		mcp.WithDescription(`设置内存监控点，找出 trace 中所有访问指定地址范围的指令（读或写）。
+		mcp.WithDescription(`设置内存监控点，找出 trace 中所有访问指定地址范围的指令（读或写）。返回 watchpoint_id 用于后续 watchpoint_traceback 调用。
 重要：set_watchpoint 通常需要配合 watchpoint_traceback 使用来追踪数据来源链。
 典型数据溯源流程：
 1. search_memory 找到感兴趣的数据，发现某条 str x1, [addr] 写入了目标地址
 2. 想知道 x1 的值从哪来 → 向上看指令，找到 ldr x1, [0x123456]
-3. set_watchpoint 监控 0x123456 → watchpoint_traceback 从 ldr 所在行号回溯，type_filter=write → 找到最后写入 0x123456 的指令
+3. set_watchpoint 监控 0x123456 → 拿到 watchpoint_id → watchpoint_traceback 从 ldr 所在行号回溯，type_filter=write → 找到最后写入 0x123456 的指令
 4. 重复此过程，逐步追溯整条数据来源链
 提示：高亮时应使用本接口传入的 addr 和 size 作为 get_memory 的 highlight_addr/highlight_size（结果中的 chunkBase 是窗口起始地址，不是精确地址）。`),
 		mcp.WithString("addr", mcp.Required(), mcp.Description("监控地址，hex 格式如 0x40001000")),
@@ -88,9 +88,10 @@ func setupMCP() http.Handler {
 	), handleSetWatchpoint)
 
 	s.AddTool(mcp.NewTool("watchpoint_traceback",
-		mcp.WithDescription(`【必须先调用 set_watchpoint】从指定行号向上回溯，在监控点结果中找到该行之前最近的写入（或读取）记录。这是追踪数据来源链的核心工具。
+		mcp.WithDescription(`【必须先调用 set_watchpoint 拿到 watchpoint_id】从指定行号向上回溯，在监控点结果中找到该行之前最近的写入（或读取）记录。这是追踪数据来源链的核心工具。
 结果按行号降序（最邻近的在前），第一条就是离目标最近的访问。
-典型用法：发现 ldr x1, [0x123456] 从某地址读取了数据，想知道谁最后写入了 0x123456 → set_watchpoint(addr=0x123456, size=8) → watchpoint_traceback(before_index=ldr所在行号, type_filter=write) → 第一条结果就是最后写入该地址的 str 指令。`),
+典型用法：发现 ldr x1, [0x123456] 从某地址读取了数据，想知道谁最后写入了 0x123456 → set_watchpoint(addr=0x123456, size=8) 拿到 watchpoint_id → watchpoint_traceback(watchpoint_id=id, before_index=ldr所在行号, type_filter=write) → 第一条结果就是最后写入该地址的 str 指令。`),
+		mcp.WithString("watchpoint_id", mcp.Required(), mcp.Description("set_watchpoint 返回的 watchpoint_id")),
 		mcp.WithNumber("before_index", mcp.Required(), mcp.Description("目标行号，只返回行号小于此值的记录")),
 		mcp.WithString("type_filter", mcp.Description("过滤类型: write / read / all，默认 write")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),

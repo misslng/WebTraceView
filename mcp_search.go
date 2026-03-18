@@ -29,9 +29,9 @@ func waitForDone(isDone func() bool, timeout time.Duration) bool {
 	}
 }
 
-// MCP-private watchpoint job (independent from Web UI's wpJob)
+// MCP watchpoint jobs indexed by ID (supports multiple concurrent watchpoints)
 var (
-	mcpWpJob   *WatchpointJob
+	mcpWpJobs  = make(map[string]*WatchpointJob)
 	mcpWpJobMu sync.Mutex
 )
 
@@ -173,17 +173,10 @@ func handleSetWatchpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 
 	// Independent job — does NOT touch global wpJob
 	wpCtx, cancel := context.WithCancel(context.Background())
+	jobId := fmt.Sprintf("wp_%s_%d", addrStr, time.Now().UnixNano())
 	job := &WatchpointJob{
-		id: fmt.Sprintf("mcp_%d", time.Now().UnixNano()), addr: addr, size: uint64(size), cancel: cancel,
+		id: jobId, addr: addr, size: uint64(size), cancel: cancel,
 	}
-
-	// Save to MCP-private variable for traceback
-	mcpWpJobMu.Lock()
-	if mcpWpJob != nil && mcpWpJob.cancel != nil {
-		mcpWpJob.cancel()
-	}
-	mcpWpJob = job
-	mcpWpJobMu.Unlock()
 
 	go runWatchpoint(wpCtx, job)
 
@@ -191,6 +184,11 @@ func handleSetWatchpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 		cancel()
 		return mcpErr("监控点搜索超时（5分钟）")
 	}
+
+	// Save to map for traceback
+	mcpWpJobMu.Lock()
+	mcpWpJobs[jobId] = job
+	mcpWpJobMu.Unlock()
 
 	job.mu.Lock()
 	total := len(job.matches)
@@ -209,7 +207,8 @@ func handleSetWatchpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	}
 
 	return mcpJSON(map[string]interface{}{
-		"done": true, "scanned": job.scanned.Load(),
+		"watchpoint_id": jobId,
+		"done":          true, "scanned": job.scanned.Load(),
 		"totalMatches": total, "totalRecords": db.totalRecs.Load(),
 		"matches": slice,
 	})
@@ -218,9 +217,13 @@ func handleSetWatchpoint(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 // ==================== Tool: watchpoint_traceback ====================
 
 func handleWatchpointTraceback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	wpId := req.GetString("watchpoint_id", "")
 	beforeIndex := req.GetInt("before_index", -1)
 	if beforeIndex < 0 {
 		return mcpErr("before_index is required")
+	}
+	if wpId == "" {
+		return mcpErr("watchpoint_id is required，请传入 set_watchpoint 返回的 watchpoint_id")
 	}
 	typeFilter := req.GetString("type_filter", "write")
 	off := req.GetInt("offset", 0)
@@ -229,13 +232,12 @@ func handleWatchpointTraceback(ctx context.Context, req mcp.CallToolRequest) (*m
 		limit = 50
 	}
 
-	// Use MCP-private watchpoint job
 	mcpWpJobMu.Lock()
-	job := mcpWpJob
+	job, ok := mcpWpJobs[wpId]
 	mcpWpJobMu.Unlock()
 
-	if job == nil {
-		return mcpErr("没有活跃的监控点，请先调用 set_watchpoint")
+	if !ok || job == nil {
+		return mcpErr("watchpoint_id 不存在，请先调用 set_watchpoint")
 	}
 
 	if !job.done.Load() {
