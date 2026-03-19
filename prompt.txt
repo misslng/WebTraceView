@@ -10,16 +10,38 @@
 我有一个 unidbg trace 文件，是对某个 SO 中签名函数的完整调用追踪。需要逆向的签名：
 
 ```
-（在这里粘贴目标签名）
+当前trace函数一共生成四个签名
+x-sgext => JBNOP5cEL1CXBC9QZDJpjz9+HHgNeAttDm0cfwh5DHYMeg92DG0Pfg9+D34Pfg9+D34Pfg9+HH4cfhx+D20Pfg9+HH4cfxx/HH8cfxx/HH8cfhx+HH4cfhx+HH4cfhx+HH4cfhxtDW0PbQ9tD34Pfg9+HH4Pfg9+HH4cewZ6HH4cbQttBm0MbQ9tRSBneBx+HG4fbg9uH24PbVsRahhxHGl/cRxqf3pzYH8MEX4pfg9+D34Pfg9+D34Pfg9+D34Pfg9+D34Pfg9gfwkRDxENdmAPSA99HmUhAhENd2APax5sHFEGVzh9d24GUXYCEQ==
+x-umt => abVowcr0SWQDAGLyy8YyB/Yf
+x-mini-wua => a+wSbVueQtN2LolAJ5DN240CCvp8fF9J+kK++sf09CZeYH8emDyEwjW6cIPowhfk5DkY0UTtXvjYKtwXOEXRsGbK//4n9/f39/f0=
+x-sign => azYBCM007xAAipjk/tLM70hvcfK4+pjqkK7zjA90V8PO/L2Mb5yvyZ3f7f7c/uwtD3kdfQzIbXzzUIyuO6Cs5sFWznqY7Ro6qPqY6p
+
+我们只需要分析x-sign并还原py纯算
 ```
 
-签名特征：（在这里描述你的初步判断，如 base64、固定前缀等）
+签名特征：签名看着是base64,但是也可能是字符+base64字符拼凑的
 
+这是生成签名的unidbg调用
+Object result = callDoCommandNative(70102,
+        "21646297",
+        "abTs5kpELDgDAGgw0ttG5AJq&&&21646297&99914b932bd37a50b983c5e7c90ae93b&1773466454&mtop.wireless.skin.atmosphere.info&1.0&&600129@taobao_android_10.59.10&&&&openappkey=DEFAULT_AUTH&27&&&&&&&",
+        false,
+        0,
+        "mtop.wireless.skin.atmosphere.info",
+        "pageId=&pageName=",
+        null, null, null,
+        "r_2", 0, 0
+);
+
+这份trace文件 调用的是一个dispatcher 根据70102...等其他数字走不同的handler 所以 没必要从上面开始分析 他有很多handler 是签名无关的
+
+如果签名参与计算的数据是从某部分解压,或者调用某个java函数获得,或者压根是显而易见的明文,就不需要向上追踪了
+
+注意 这是一份多线程的trace文件
 ## 核心分析方法：从底向上的数据溯源
 
 ### 第一步：定位目标数据
-- search_memory 搜索目标签名的特征字节（原始字符串、base64 解码后的 hex 等）
-- 如果签名看起来是 base64，也搜索 base64 字符表定位编码函数
+- search_memory 搜索目标签名的特征字节
 
 ### 第二步：查看上下文
 - 对搜索命中的指令，用 `get_instructions(center=命中行号, context_size=30)` 查看前后上下文
@@ -78,3 +100,4 @@
 2. 每完成一层追溯，记录分析思路和发现
 3. 如果需要 unidbg-trace MCP 服务添加新功能，告诉我
 4. 在没有完全逆出签名算法之前，不要停止分析
+5. 有阶段性的分析成果需要先写入md文件
