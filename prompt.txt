@@ -16,7 +16,7 @@ x-umt => abVowcr0SWQDAGLyy8YyB/Yf
 x-mini-wua => a+wSbVueQtN2LolAJ5DN240CCvp8fF9J+kK++sf09CZeYH8emDyEwjW6cIPowhfk5DkY0UTtXvjYKtwXOEXRsGbK//4n9/f39/f0=
 x-sign => azYBCM007xAAipjk/tLM70hvcfK4+pjqkK7zjA90V8PO/L2Mb5yvyZ3f7f7c/uwtD3kdfQzIbXzzUIyuO6Cs5sFWznqY7Ro6qPqY6p
 
-我们只需要分析x-sign并还原py纯算
+我们需要分析这四个参数 其中x-umt可以跳过（这是设备指纹） 并还原py纯算 不要忘记这四个参数，推荐你先 写入到analy.md
 ```
 
 签名特征：签名看着是base64,但是也可能是字符+base64字符拼凑的
