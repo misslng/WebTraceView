@@ -133,3 +133,41 @@ Object result = callDoCommandNative(70102,
 
 ！！重要！！
 需要持续记录你的分析，只要是经过验证的分析结论或者是调用mcp服务返回的结果，有意义的都需要写入analy.md文件，要留痕，方便哪怕我想自己分析，也能根据你md文件的思路去验证，方便后续上下文满了或是停止了可以继续分析
+
+### 核心三板斧
+
+在 VM 保护的代码中，不要用 `search_instructions` 硬找指令（VM handler 地址固定，结果太多噪音）。
+正确做法是 **追数据不追指令**：
+
+```
+Step 1: search_memory(目标字节序列)
+  → 找到哪条指令在哪个地址访问了这些字节
+  → 确定数据所在的内存地址
+
+Step 2: set_watchpoint(地址, size)
+  → 抓住该地址上的所有 read/write
+  → 按 index 降序返回，最新的在前
+
+Step 3: watchpoint_traceback(watchpoint_id, before_index, type_filter=write)
+  → 从某条指令往回找，谁最后写了这个地址
+  → 第一条结果就是离目标最近的写入
+
+然后对写入指令中的源值，重复上述过程往上追。
+```
+
+### 反面教训（走弯路的例子）
+
+追 hash_A 时的错误路径：
+1. ❌ 搜到 `0x40f7d2cf` 地址有目标字节 → 但这只是中间 copy
+2. ❌ traceback 到 `0x40f7d1d0` → 又是一层 copy
+3. ❌ traceback 到 `0x40f7ddec` → 还是 copy
+4. ❌ 看到附近内存有 `f2438a7500e0d6ac...` hex 字符串 → 以为是 MD5 输入，花了大量时间暴力猜测
+5. ❌ search_instructions 搜 strb 指令 → 结果太多，效率低
+
+正确路径（用户指出）：
+1. ✅ search_memory 搜目标字节 → 找到首次出现的地址 `0x40f7d0d1`
+2. ✅ set_watchpoint 在 `0x40f7d0d1` → 看到 strb 逐字节写入
+3. ✅ 观察 strb 的 w12 值（如 `0x340ce663`）→ 这是 32 位累积值，每次右移取字节
+4. ✅ 看 w12 的源头：`ldr` 从 `0x40f7c85c` 读出（如 `0x85405d08`）
+5. ✅ watchpoint 在 `0x40f7c858` → traceback 发现初始值 = `0x67452301`（MD5 init!）
+6. ✅ 结论：`0x40f7c858` 就是 MD5 状态寄存器 [A,B,C,D]，hash_A 是从最终 MD5 结果按大端序拆字节
