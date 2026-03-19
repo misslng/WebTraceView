@@ -79,6 +79,7 @@ Object result = callDoCommandNative(70102,
 - AES：搜索 S-Box 或 "aes" 相关指令
 - 异或/位运算：eor, orr, and 指令密集出现
 - 查表：ldrb + 大量内存读取
+- 如果是白盒算法，可以确定是什么算法后，先不处理，后续用dfa解决
 
 ### 第五步：记录和还原
 - 每追溯一层，记录：地址、指令、数据变换关系
