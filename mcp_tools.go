@@ -137,6 +137,27 @@ func handleGetInstructions(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		db.tidIndexMu.RUnlock()
 
 		filteredTotal := len(matched)
+
+		// center 模式下 off 是全局 index，需要转成过滤数组中的位置
+		if args := req.GetArguments(); args != nil {
+			if _, ok := args["center"]; ok {
+				center := req.GetInt("center", 0)
+				ctxSize := req.GetInt("context_size", 20)
+				if ctxSize <= 0 {
+					ctxSize = 20
+				}
+				pos := sort.SearchInts(matched, center)
+				off = pos - ctxSize
+				if off < 0 {
+					off = 0
+				}
+				limit = ctxSize*2 + 1
+				if limit > 500 {
+					limit = 500
+				}
+			}
+		}
+
 		end := off + limit
 		if end > filteredTotal {
 			end = filteredTotal
