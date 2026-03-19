@@ -159,9 +159,8 @@ Step 3: set_watchpoint(数据源地址, size) + watchpoint_traceback(before_inde
 ### 反面教训（走弯路的例子）
 
 追 hash_A 时的错误路径：
-1. ❌ set_watchpoint 在最终目的地 `0x40f7d2cf` → 但这只是中间 copy，追了 3 层 copy 浪费时间
-2. ❌ 看到附近内存有 `f2438a7500e0d6ac...` hex 字符串 → 以为是 MD5 输入，花大量时间暴力猜
-3. ❌ search_instructions 搜 strb handler → VM 里同一 handler 执行百万次，噪音太大
+1. ❌ 看到附近内存有 `f2438a7500e0d6ac...` hex 字符串 → 以为是 MD5 输入，花大量时间暴力猜
+2. ❌ search_instructions 搜 strb handler → VM 里同一 handler 执行百万次，噪音太大
 
 正确路径（三板斧应用）：
 1. ✅ **search_memory** 搜 `6385405d085e9182` → 找到写入点（strb 往 `0x40f7d0d1` 写）
