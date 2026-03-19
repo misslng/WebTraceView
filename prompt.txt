@@ -16,7 +16,33 @@ x-umt => abVowcr0SWQDAGLyy8YyB/Yf
 x-mini-wua => a+wSbVueQtN2LolAJ5DN240CCvp8fF9J+kK++sf09CZeYH8emDyEwjW6cIPowhfk5DkY0UTtXvjYKtwXOEXRsGbK//4n9/f39/f0=
 x-sign => azYBCM007xAAipjk/tLM70hvcfK4+pjqkK7zjA90V8PO/L2Mb5yvyZ3f7f7c/uwtD3kdfQzIbXzzUIyuO6Cs5sFWznqY7Ro6qPqY6p
 
-我们需要分析这四个参数 其中x-umt可以跳过（这是设备指纹） 并还原py纯算 不要忘记这四个参数，推荐你先 写入到analy.md
+我们只要分析x-sign 其中x-umt可以跳过（这是设备指纹） 并还原py纯算 不要忘记这四个参数，推荐你先 写入到analy.md
+
+下面是我自己分析的一部分成果
+x-sign
+azYBCM007x固定
+
+AAipjk/tLM70hvcfK4+pjqkK7zjA90V8PO/L2Mb5yvyZ3f7f7c/uwtD3kdfQzIbXzzUIyuO6Cs5sFWznqY7Ro6qPqY6p
+
+base64解完
+00 08 a9 8e 4f ed 2c ce f4 86 f7 1f 2b 8f a9 8e a9 0a ef 38 c0 f7 45 7c 3c ef cb d8 c6 f9 ca fc 99 dd fe df ed cf ee c2 d0 f7 91 d7 d0 cc 86 d7 cf 35 08 ca e3 ba 0a ce 6c 15 6c e7 a9 8e d1 a3 aa 8f a9 8e a9
+
+0040f7dddf
+00 ec dd f7 40 00 00 00 00 45 00 00 00 00 08 a9
+0040f7ddef
+8e 4f ed 2c ce f4 86 f7 1f 2b 8f a9 8e a9 0a ef
+0040f7ddff
+38 c0 f7 45 7c 3c ef cb d8 c6 f9 ca fc 99 dd fe
+0040f7de0f
+df ed cf ee c2 d0 f7 91 d7 d0 cc 86 d7 cf 35 08
+0040f7de1f
+ca e3 ba 0a ce 6c 15 6c e7 a9 8e d1 a3 aa 8f a9
+0040f7de2f
+8e a9
+
+
+
+
 ```
 
 签名特征：签名看着是base64,但是也可能是字符+base64字符拼凑的
@@ -39,6 +65,8 @@ Object result = callDoCommandNative(70102,
 
 注意 这是一份多线程的trace文件
 ## 核心分析方法：从底向上的数据溯源
+
+重要的一点,我们的算法还原,一定是抽丝剥茧的,比如签名->base64->md5 我们先不关心md5的数据从哪里来,而是先写出算法模板,用固定数据去验证,是否是base64->md5
 
 ### 第一步：定位目标数据
 - search_memory 搜索目标签名的特征字节
