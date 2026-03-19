@@ -2530,7 +2530,7 @@ document.getElementById('tlClose').addEventListener('click', () => {
   const bar = document.getElementById('tlDragBar');
   let dragging = false, dx = 0, dy = 0;
   bar.addEventListener('mousedown', (e) => {
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'SELECT') return;
     dragging = true;
     dx = e.clientX - panel.offsetLeft;
     dy = e.clientY - panel.offsetTop;
