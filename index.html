@@ -363,6 +363,8 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 <div id="timelineFloat" style="display:none;position:fixed;right:20px;top:60px;width:500px;height:400px;z-index:999;background:#1e1e1e;border:1px solid #555;border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,0.5);display:none;flex-direction:column;resize:both;overflow:hidden">
   <div id="tlDragBar" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:#2d2d2d;border-bottom:1px solid #404040;border-radius:6px 6px 0 0;cursor:move;user-select:none;flex-shrink:0">
     <span style="font-size:12px;color:#569cd6;flex:1">📊 函数调用流程</span>
+    <select id="tlTidFilter" style="background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:2px 4px;font-size:10px;font-family:inherit;border-radius:3px">
+    </select>
     <input type="text" id="tlSearch" placeholder="搜索..." style="background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:2px 6px;font-size:10px;font-family:inherit;border-radius:3px;width:120px">
     <span id="tlInfo" style="font-size:10px;color:#808080"></span>
     <button id="tlClose" style="background:none;border:none;color:#808080;cursor:pointer;font-size:14px;padding:0 4px">✕</button>
@@ -2425,26 +2427,64 @@ let cfFiltered = null;
 let cfTotal = 0;
 let cfLoaded = false;
 let cfLoading = false;
+let cfTidFilter = ''; // 当前选中的线程过滤
 
-document.getElementById('btnCallTimeline').addEventListener('click', async () => {
-  const panel = document.getElementById('timelineFloat');
-  if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
-  panel.style.display = 'flex';
-  if (cfLoaded) { initVirtualScroll(); return; }
+async function loadCallTimeline(tid) {
+  cfLines = [];
+  cfFiltered = null;
+  cfTotal = 0;
+  cfLoaded = false;
+  cfLoading = false;
+  cfTidFilter = tid || '';
   document.getElementById('tlBody').innerHTML = '<div style="padding:20px;color:#808080">加载中...</div>';
+  const tidParam = cfTidFilter ? '&tid=' + cfTidFilter : '';
   try {
-    // 先拉第一页，获取 total
-    const data = await fetchJSON('/api/calltree?offset=0&limit=200');
+    const data = await fetchJSON('/api/calltree?offset=0&limit=200' + tidParam);
     cfTotal = data.total || 0;
     cfLines = data.lines || [];
     document.getElementById('tlInfo').textContent = '已加载 ' + cfLines.length.toLocaleString() + ' / ' + cfTotal.toLocaleString() + ' 行';
     initVirtualScroll();
     if (cfLines.length >= cfTotal) {
       cfLoaded = true;
+      document.getElementById('tlInfo').textContent = '共 ' + cfLines.length.toLocaleString() + ' 行';
     }
   } catch(e) {
     document.getElementById('tlBody').innerHTML = '<div style="padding:20px;color:#808080">加载失败: ' + e.message + '</div>';
   }
+}
+
+// 填充线程下拉框，默认选主线程
+async function populateTidFilter() {
+  const sel = document.getElementById('tlTidFilter');
+  if (sel.options.length > 0) return; // 已填充
+  try {
+    const info = await fetchJSON('/api/info');
+    const tids = info.threadIds || [];
+    tids.forEach((tid, i) => {
+      const opt = document.createElement('option');
+      opt.value = tid;
+      opt.textContent = '线程 ' + tid;
+      sel.appendChild(opt);
+    });
+    // 默认选第一个（主线程）
+    if (sel.options.length > 0) {
+      sel.selectedIndex = 0;
+      cfTidFilter = sel.value;
+    }
+  } catch(e) {}
+}
+
+document.getElementById('tlTidFilter').addEventListener('change', (e) => {
+  loadCallTimeline(e.target.value);
+});
+
+document.getElementById('btnCallTimeline').addEventListener('click', async () => {
+  const panel = document.getElementById('timelineFloat');
+  if (panel.style.display === 'flex') { panel.style.display = 'none'; return; }
+  panel.style.display = 'flex';
+  await populateTidFilter();
+  if (cfLoaded && cfTidFilter === document.getElementById('tlTidFilter').value) { initVirtualScroll(); return; }
+  loadCallTimeline(document.getElementById('tlTidFilter').value);
 });
 
 async function loadRemainingLines() {
@@ -2461,7 +2501,7 @@ function loadMoreIfNeeded() {
   if (endIdx > cfLines.length * 0.8 && cfLines.length < cfTotal) {
     cfLoading = true;
     const batchSize = 2000;
-    fetchJSON('/api/calltree?offset=' + cfLines.length + '&limit=' + batchSize).then(data => {
+    fetchJSON('/api/calltree?offset=' + cfLines.length + '&limit=' + batchSize + (cfTidFilter ? '&tid=' + cfTidFilter : '')).then(data => {
       const batch = data.lines || [];
       if (batch.length > 0) {
         cfLines = cfLines.concat(batch);

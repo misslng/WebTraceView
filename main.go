@@ -91,6 +91,7 @@ type FuncEvent struct {
 	PC    uint64 `json:"pc"`
 	Depth int16  `json:"depth"`
 	Type  byte   `json:"type"` // 'C' = call, 'R' = ret
+	Tid   int32  `json:"tid"`
 }
 
 type CallFlowLine struct {
@@ -99,6 +100,7 @@ type CallFlowLine struct {
 	Depth int    `json:"depth"`
 	From  int    `json:"from"`
 	To    int    `json:"to"`
+	Tid   int32  `json:"tid"`
 }
 
 func (db *TraceDB) getFile() *os.File {
@@ -209,10 +211,12 @@ func (db *TraceDB) buildIndexAsync() {
 	count := 0
 	magic := make([]byte, 4)
 	hdr := make([]byte, 12)
-	callDepth := int16(0)
-	retStack := make([]uint64, 0, 256)
-	pendingRet := false
-	pendingCallIdx := -1 // 上一条是 bl/blr 时记录其 index
+	callDepth := make(map[int32]int16)    // per-thread call depth
+	retStack := make(map[int32][]uint64)  // per-thread return address stack
+	pendingRet := make(map[int32]bool)    // per-thread pending ret flag
+	pendingCallIdx := make(map[int32]int) // per-thread pending call index
+	pendingCallTid := int32(0)            // tid of the last bl/blr instruction
+	lastTid := int32(0)                   // tid of the previous instruction
 
 	for {
 		if _, err := io.ReadFull(br, magic); err != nil {
@@ -251,45 +255,41 @@ func (db *TraceDB) buildIndexAsync() {
 		}
 		offset += int64(pcTextLen)
 
-		// 如果上一条是 bl/blr，当前 PC 就是被调用函数的入口
-		if pendingCallIdx >= 0 {
+		// 如果上一条是 bl/blr（同线程），当前 PC 就是被调用函数的入口
+		if idx, ok := pendingCallIdx[tid]; ok && idx >= 0 && tid == pendingCallTid {
 			db.funcMu.Lock()
 			entry, ok := db.funcMap[pc]
 			if !ok {
-				entry = &FuncEntry{FirstCall: pendingCallIdx}
+				entry = &FuncEntry{FirstCall: idx}
 				db.funcMap[pc] = entry
 			}
 			entry.CallCount++
 			entry.lastCallIdx = count
 			db.funcMu.Unlock()
-			pendingCallIdx = -1
+			delete(pendingCallIdx, tid)
 		}
 
-		// 如果上一条是 ret，用当前 PC 去栈里匹配
-		if pendingRet {
-			pendingRet = false
+		// 如果上一条是 ret（同线程），用当前 PC 去该线程栈里匹配
+		if pendingRet[tid] && tid == lastTid {
+			pendingRet[tid] = false
 			matched := false
-			// 从栈顶往下找（最近的 bl 优先匹配）
-			for i := len(retStack) - 1; i >= 0; i-- {
-				if retStack[i] == pc {
-					// 匹配成功，弹出这个及以上的所有条目
-					retStack = retStack[:i]
-					callDepth = int16(i)
+			stack := retStack[tid]
+			for i := len(stack) - 1; i >= 0; i-- {
+				if stack[i] == pc {
+					retStack[tid] = stack[:i]
+					callDepth[tid] = int16(i)
 					matched = true
-					// 记录 ret 事件
 					db.funcEventsMu.Lock()
-					db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth, Type: 'R'})
+					db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth[tid], Type: 'R', Tid: tid})
 					db.funcEventsMu.Unlock()
 					break
 				}
 			}
 			if !matched {
-				// 没匹配到，说明是 tail call 的 ret，depth 不变
-				// callDepth 保持不变（ret 时没减，所以不用加回来）
+				// tail call 的 ret，depth 不变
 			}
-			// 回填 ret 那条指令的 depth（ret 应该和返回后的 depth 一致）
 			db.depthMu.Lock()
-			db.depths[len(db.depths)-1] = callDepth
+			db.depths[len(db.depths)-1] = callDepth[tid]
 			db.depthMu.Unlock()
 		}
 
@@ -317,12 +317,11 @@ func (db *TraceDB) buildIndexAsync() {
 			mnemonic == "blraa" || mnemonic == "blrab" || mnemonic == "blraaz" || mnemonic == "blrabz"
 
 		if isRet {
-			pendingRet = true
-			// 先用当前 callDepth 占位，下一条指令匹配后会回填正确值
+			pendingRet[tid] = true
 		}
 
 		db.depthMu.Lock()
-		db.depths = append(db.depths, callDepth)
+		db.depths = append(db.depths, callDepth[tid])
 		db.depthMu.Unlock()
 
 		// 记录 tid
@@ -331,15 +330,16 @@ func (db *TraceDB) buildIndexAsync() {
 		db.tidMu.Unlock()
 
 		if isCall {
-			// bl 的返回地址 = pc + 4
-			retStack = append(retStack, pc+4)
-			callDepth++
-			pendingCallIdx = count
-			// 记录 call 事件
+			retStack[tid] = append(retStack[tid], pc+4)
+			callDepth[tid]++
+			pendingCallIdx[tid] = count
+			pendingCallTid = tid
 			db.funcEventsMu.Lock()
-			db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth, Type: 'C'})
+			db.funcEvents = append(db.funcEvents, FuncEvent{Index: count, PC: pc, Depth: callDepth[tid], Type: 'C', Tid: tid})
 			db.funcEventsMu.Unlock()
 		}
+
+		lastTid = tid
 
 		// 跳 regText
 		var regLen uint16
@@ -2229,7 +2229,26 @@ func handleCallTimeline(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 
-	total := len(db.callFlowLines)
+	// tid 过滤
+	tidFilter := int32(-1)
+	if tidStr := r.URL.Query().Get("tid"); tidStr != "" {
+		if v, err := strconv.Atoi(tidStr); err == nil {
+			tidFilter = int32(v)
+		}
+	}
+
+	var source []CallFlowLine
+	if tidFilter >= 0 {
+		for _, line := range db.callFlowLines {
+			if line.Tid == tidFilter {
+				source = append(source, line)
+			}
+		}
+	} else {
+		source = db.callFlowLines
+	}
+
+	total := len(source)
 	end := offset + limit
 	if end > total {
 		end = total
@@ -2237,7 +2256,7 @@ func handleCallTimeline(w http.ResponseWriter, r *http.Request) {
 
 	var slice []CallFlowLine
 	if offset < total {
-		slice = db.callFlowLines[offset:end]
+		slice = source[offset:end]
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2258,12 +2277,15 @@ func buildCallFlowLines() {
 		index int
 		pc    uint64
 		depth int16
+		tid   int32
 	}
-	stack := make([]StackEntry, 0, 256)
+	// Per-thread stacks
+	stacks := make(map[int32][]StackEntry)
 	lines := make([]CallFlowLine, 0, len(events)*2+1)
 
-	// 根函数
+	// 根函数（用第一条记录的线程）
 	firstPC := uint64(0)
+	firstTid := int32(0)
 	fileOff := db.seekToRecord(0)
 	if fileOff >= 0 {
 		f := db.getFile()
@@ -2271,38 +2293,41 @@ func buildCallFlowLines() {
 			info, err := readInstrAt(f, fileOff)
 			if err == nil {
 				firstPC = info.PC
+				firstTid = info.ThreadId
 			}
 			db.putFile(f)
 		}
 	}
 	lines = append(lines, CallFlowLine{
-		Type: "call", PC: fmt.Sprintf("0x%x", firstPC), Depth: 0, From: 0, To: total,
+		Type: "call", PC: fmt.Sprintf("0x%x", firstPC), Depth: 0, From: 0, To: total, Tid: firstTid,
 	})
 
 	for _, ev := range events {
+		tid := ev.Tid
 		if ev.Type == 'C' {
-			stack = append(stack, StackEntry{index: ev.Index, pc: ev.PC, depth: ev.Depth})
+			stacks[tid] = append(stacks[tid], StackEntry{index: ev.Index, pc: ev.PC, depth: ev.Depth, tid: tid})
 			lines = append(lines, CallFlowLine{
-				Type: "call", PC: fmt.Sprintf("0x%x", ev.PC), Depth: int(ev.Depth), From: ev.Index, To: 0,
+				Type: "call", PC: fmt.Sprintf("0x%x", ev.PC), Depth: int(ev.Depth), From: ev.Index, To: 0, Tid: tid,
 			})
 		} else if ev.Type == 'R' {
+			stack := stacks[tid]
 			if len(stack) > 0 {
 				top := stack[len(stack)-1]
-				stack = stack[:len(stack)-1]
-				// call 行补上 To
-				// ret 行的 idx 指向返回后的下一条指令
+				stacks[tid] = stack[:len(stack)-1]
 				lines = append(lines, CallFlowLine{
-					Type: "ret", PC: fmt.Sprintf("0x%x", top.pc), Depth: int(top.depth), From: top.index, To: ev.Index,
+					Type: "ret", PC: fmt.Sprintf("0x%x", top.pc), Depth: int(top.depth), From: top.index, To: ev.Index, Tid: tid,
 				})
 			}
 		}
 	}
-	// 栈里剩余的
-	for i := len(stack) - 1; i >= 0; i-- {
-		s := stack[i]
-		lines = append(lines, CallFlowLine{
-			Type: "ret", PC: fmt.Sprintf("0x%x", s.pc), Depth: int(s.depth), From: s.index, To: total,
-		})
+	// 栈里剩余的（每个线程）
+	for tid, stack := range stacks {
+		for i := len(stack) - 1; i >= 0; i-- {
+			s := stack[i]
+			lines = append(lines, CallFlowLine{
+				Type: "ret", PC: fmt.Sprintf("0x%x", s.pc), Depth: int(s.depth), From: s.index, To: total, Tid: tid,
+			})
+		}
 	}
 
 	db.callFlowLines = lines
