@@ -119,9 +119,11 @@ func handleSearchInstructions(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	// Independent job — does NOT touch global instrSearch
 	searchCtx, cancel := context.WithCancel(context.Background())
+	kwLower := strings.ToLower(keyword)
 	job := &InstrSearchJob{
 		id:      fmt.Sprintf("mcp_%d", time.Now().UnixNano()),
-		keyword: strings.ToLower(keyword),
+		keyword: kwLower,
+		tokens:  strings.Fields(kwLower),
 		cancel:  cancel,
 	}
 

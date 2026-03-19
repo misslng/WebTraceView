@@ -5,9 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -252,81 +249,79 @@ func handleGetMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 		return mcpErr("读取失败")
 	}
 
-	// Parse highlight params
-	var hlAddr int64 = -1
-	var hlSize int
-	if addrStr := req.GetString("highlight_addr", ""); addrStr != "" {
-		parsed, err := strconv.ParseUint(strings.TrimPrefix(addrStr, "0x"), 16, 64)
-		if err == nil {
-			hlAddr = int64(parsed)
-			hlSize = req.GetInt("highlight_size", 4)
-		}
-	}
-
 	type AccessRange struct {
 		Start string `json:"start"`
 		Size  int    `json:"size"`
-	}
-	type Highlight struct {
-		Addr        string `json:"addr"`
-		Size        int    `json:"size"`
-		OffsetInHex int    `json:"offsetInHex"`
-		DataHex     string `json:"dataHex"`
+		Hex   string `json:"hex"`
 	}
 	type Region struct {
-		Base        string       `json:"base"`
-		Size        int          `json:"size"`
-		Hex         string       `json:"hex"`
-		Type        string       `json:"type"`
-		AccessRange *AccessRange `json:"accessRange,omitempty"`
-		HL          *Highlight   `json:"highlight,omitempty"`
+		Base        string            `json:"base"`
+		Size        int               `json:"size"`
+		Hex         map[string]string `json:"hex"`
+		Type        string            `json:"type"`
+		AccessRange *AccessRange      `json:"accessRange,omitempty"`
 	}
+
+	const contextBytes = 32
 
 	regions := make([]Region, 0)
 	processChunks := func(chunks []MemChunk, chunkType string) {
 		for _, c := range chunks {
-			r := Region{
-				Base: fmt.Sprintf("0x%x", c.Base),
-				Size: len(c.Data),
-				Hex:  hex.EncodeToString(c.Data),
-				Type: chunkType,
-			}
 			// Calculate access range (middle of 256-byte window)
-			windowSize := 256
-			if len(c.Data) > windowSize {
-				accessSize := len(c.Data) - windowSize
-				accessStart := c.Base + uint64(windowSize/2)
-				r.AccessRange = &AccessRange{
-					Start: fmt.Sprintf("0x%x", accessStart),
-					Size:  accessSize,
-				}
+			const windowSize = 256
+			accessSize := len(c.Data) - windowSize
+			if accessSize < 1 {
+				accessSize = 1
 			}
-			// Highlight
-			if hlAddr >= 0 && hlSize > 0 {
-				hlStart := uint64(hlAddr)
-				hlEnd := hlStart + uint64(hlSize)
-				chunkEnd := c.Base + uint64(len(c.Data))
-				if hlStart >= c.Base && hlStart < chunkEnd {
-					offsetInChunk := int(hlStart - c.Base)
-					extractEnd := offsetInChunk + hlSize
-					if extractEnd > len(c.Data) {
-						extractEnd = len(c.Data)
-					}
-					_ = hlEnd
-					r.HL = &Highlight{
-						Addr:        fmt.Sprintf("0x%x", hlStart),
-						Size:        hlSize,
-						OffsetInHex: offsetInChunk * 2,
-						DataHex:     hex.EncodeToString(c.Data[offsetInChunk:extractEnd]),
-					}
+			accessStartOff := windowSize / 2
+			accessEndOff := accessStartOff + accessSize
+			if accessEndOff > len(c.Data) {
+				accessEndOff = len(c.Data)
+			}
+			accessStartAddr := c.Base + uint64(accessStartOff)
+
+			// 提取 accessRange 的 hex
+			accessHex := hex.EncodeToString(c.Data[accessStartOff:accessEndOff])
+
+			// 截取上下 contextBytes 字节的窗口
+			windowStart := accessStartOff - contextBytes
+			if windowStart < 0 {
+				windowStart = 0
+			}
+			windowEnd := accessEndOff + contextBytes
+			if windowEnd > len(c.Data) {
+				windowEnd = len(c.Data)
+			}
+			windowData := c.Data[windowStart:windowEnd]
+			windowBase := c.Base + uint64(windowStart)
+
+			// 4字节分组格式化 hex
+			hexMap := make(map[string]string)
+			for off := 0; off < len(windowData); off += 4 {
+				end := off + 4
+				if end > len(windowData) {
+					end = len(windowData)
 				}
+				addr := windowBase + uint64(off)
+				hexMap[fmt.Sprintf("0x%x", addr)] = hex.EncodeToString(windowData[off:end])
+			}
+
+			r := Region{
+				Base: fmt.Sprintf("0x%x", windowBase),
+				Size: len(windowData),
+				Hex:  hexMap,
+				Type: chunkType,
+				AccessRange: &AccessRange{
+					Start: fmt.Sprintf("0x%x", accessStartAddr),
+					Size:  accessSize,
+					Hex:   accessHex,
+				},
 			}
 			regions = append(regions, r)
 		}
 	}
 	processChunks(readChunks, "read")
 	processChunks(writeChunks, "write")
-	sort.Slice(regions, func(i, j int) bool { return regions[i].Base < regions[j].Base })
 
 	return mcpJSON(map[string]interface{}{
 		"index": idx, "regions": regions,

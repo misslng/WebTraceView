@@ -272,28 +272,22 @@ func TestGetMemory(t *testing.T) {
 		t.Errorf("expected read region, got %v", r0["type"])
 	}
 
-	// Test with highlight
-	result2, err := handleGetMemory(context.Background(), makeCallReq(map[string]interface{}{
-		"index": float64(1), "highlight_addr": "0x40001000", "highlight_size": float64(4),
-	}))
-	if err != nil {
-		t.Fatal(err)
+	// Test hex map format (4-byte groups)
+	hexMap, ok := r0["hex"].(map[string]interface{})
+	if !ok {
+		t.Error("expected hex to be a map")
+	} else {
+		t.Logf("get_memory hex map has %d entries", len(hexMap))
 	}
-	m2 := parseResult(t, result2)
-	regions2 := m2["regions"].([]interface{})
-	foundHL := false
-	for _, r := range regions2 {
-		rm := r.(map[string]interface{})
-		if rm["highlight"] != nil {
-			foundHL = true
-			hl := rm["highlight"].(map[string]interface{})
-			t.Logf("highlight: addr=%v size=%v dataHex=%v", hl["addr"], hl["size"], hl["dataHex"])
+
+	// Test accessRange with hex
+	if ar, ok := r0["accessRange"].(map[string]interface{}); ok {
+		if ar["hex"] == nil {
+			t.Error("expected accessRange.hex")
 		}
+		t.Logf("get_memory accessRange: start=%v size=%v hex=%v", ar["start"], ar["size"], ar["hex"])
 	}
-	if !foundHL {
-		t.Error("expected highlight in result")
-	}
-	t.Logf("get_memory OK: regions and highlight work")
+	t.Logf("get_memory OK: regions with hex map and accessRange.hex work")
 }
 
 func TestGetFunctions(t *testing.T) {

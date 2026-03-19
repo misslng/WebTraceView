@@ -129,7 +129,8 @@ type SearchMatch struct {
 	Index       int    `json:"index"`
 	PC          string `json:"pc"`
 	InstrText   string `json:"instrText"`
-	ChunkBase   string `json:"chunkBase"`
+	RegText     string `json:"regText"`
+	MatchAddr   string `json:"matchAddr"`
 	MatchOff    int    `json:"matchOffset"`
 	ChunkType   string `json:"type"` // "read" or "write"
 	PatternLen  int    `json:"patternLen"`
@@ -1185,11 +1186,12 @@ func runSearch(ctx context.Context, job *SearchJob) {
 	}
 	wg.Wait()
 
-	// 按 segment 顺序合并
+	// 按 segment 顺序合并，然后按 index desc 排序
 	job.mu.Lock()
 	for _, local := range localResults {
 		job.matches = append(job.matches, local...)
 	}
+	sort.Slice(job.matches, func(i, j int) bool { return job.matches[i].Index > job.matches[j].Index })
 	job.mu.Unlock()
 }
 
@@ -1213,6 +1215,7 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 
 	// 复用缓冲区减少 GC
 	instrBuf := make([]byte, 0, 256)
+	regBuf := make([]byte, 0, 512)
 	hdr := make([]byte, 18)
 
 	for idx < endIdx {
@@ -1254,19 +1257,25 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 			return local
 		}
 
-		// 跳 regText
+		// 读 regText
 		var regLen uint16
 		if err := binary.Read(br, binary.LittleEndian, &regLen); err != nil {
 			return local
 		}
-		if _, err := io.CopyN(io.Discard, br, int64(regLen)); err != nil {
+		if cap(regBuf) < int(regLen) {
+			regBuf = make([]byte, regLen, int(regLen)*2)
+		} else {
+			regBuf = regBuf[:regLen]
+		}
+		if _, err := io.ReadFull(br, regBuf); err != nil {
 			return local
 		}
+		regText := string(regBuf)
 
 		// 读 readChunks 并搜索
-		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), "read", local)
+		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), regText, "read", local)
 		// 读 writeChunks 并搜索
-		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), "write", local)
+		local = searchChunkGroup(br, job, idx, pcText, string(instrBuf), regText, "write", local)
 
 		idx++
 		job.scanned.Add(1)
@@ -1279,7 +1288,7 @@ func runSearchSegment(ctx context.Context, job *SearchJob, fileOffset int64, sta
 	return local
 }
 
-func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, instrText string, chunkType string, local []SearchMatch) []SearchMatch {
+func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, instrText string, regText string, chunkType string, local []SearchMatch) []SearchMatch {
 	var cnt uint32
 	if err := binary.Read(br, binary.LittleEndian, &cnt); err != nil {
 		return local
@@ -1338,7 +1347,8 @@ func searchChunkGroup(br *bufio.Reader, job *SearchJob, idx int, pcText string, 
 					Index:       idx,
 					PC:          pcText,
 					InstrText:   instrText,
-					ChunkBase:   fmt.Sprintf("0x%x", matchAddr),
+					RegText:     regText,
+					MatchAddr:   fmt.Sprintf("0x%x", matchAddr),
 					MatchOff:    matchStart,
 					ChunkType:   chunkType,
 					PatternLen:  len(job.pattern),
@@ -1370,6 +1380,7 @@ type InstrSearchMatch struct {
 type InstrSearchJob struct {
 	id      string
 	keyword string
+	tokens  []string // keyword 按空格拆分后的小写 token 列表
 
 	mu      sync.Mutex
 	matches []InstrSearchMatch
@@ -1394,9 +1405,11 @@ func handleSearchInstr(w http.ResponseWriter, r *http.Request) {
 			instrSearch.cancel()
 		}
 		ctx, cancel := context.WithCancel(context.Background())
+		kwLower := strings.ToLower(req.Keyword)
 		job := &InstrSearchJob{
 			id:      fmt.Sprintf("%d", time.Now().UnixNano()),
-			keyword: strings.ToLower(req.Keyword),
+			keyword: kwLower,
+			tokens:  strings.Fields(kwLower),
 			cancel:  cancel,
 		}
 		instrSearch = job
@@ -1531,6 +1544,7 @@ func runInstrSearch(ctx context.Context, job *InstrSearchJob) {
 	for _, local := range localResults {
 		job.matches = append(job.matches, local...)
 	}
+	sort.Slice(job.matches, func(i, j int) bool { return job.matches[i].Index > job.matches[j].Index })
 	job.mu.Unlock()
 }
 
@@ -1610,8 +1624,21 @@ func runInstrSearchSegment(ctx context.Context, job *InstrSearchJob, fileOffset 
 		instrText := string(instrBuf)
 		regText := string(regBuf)
 
-		haystack := strings.ToLower(instrText + " " + pcText + " " + regText)
-		if strings.Contains(haystack, job.keyword) {
+		// 每个 token 只要在 instrText / pcText / regText 任一字段中出现即算该 token 匹配
+		// 所有 token 都匹配才算整条命中
+		instrLower := strings.ToLower(instrText)
+		pcLower := strings.ToLower(pcText)
+		regLower := strings.ToLower(regText)
+		allMatched := true
+		for _, tok := range job.tokens {
+			if !strings.Contains(instrLower, tok) &&
+				!strings.Contains(pcLower, tok) &&
+				!strings.Contains(regLower, tok) {
+				allMatched = false
+				break
+			}
+		}
+		if allMatched {
 			depth := 0
 			db.depthMu.RLock()
 			if idx < len(db.depths) {
@@ -1683,7 +1710,10 @@ type WatchpointMatch struct {
 	Index       int    `json:"index"`
 	PC          string `json:"pc"`
 	InstrText   string `json:"instrText"`
-	ChunkBase   string `json:"chunkBase"`
+	RegText     string `json:"regText"`
+	HexText     string `json:"hexText"`
+	AccessStart string `json:"accessStart"`
+	AccessEnd   string `json:"accessEnd"`
 	ChunkType   string `json:"type"`
 	DataPreview string `json:"dataPreview"`
 }
@@ -1850,6 +1880,7 @@ func runWatchpoint(ctx context.Context, job *WatchpointJob) {
 	for _, local := range localResults {
 		job.matches = append(job.matches, local...)
 	}
+	sort.Slice(job.matches, func(i, j int) bool { return job.matches[i].Index > job.matches[j].Index })
 	job.mu.Unlock()
 }
 
@@ -1867,6 +1898,7 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 	hdr := make([]byte, 18)
 	idx := startIdx
 	wLo, wHi := job.addr, job.addr+job.size
+	regBuf := make([]byte, 0, 512)
 
 	for idx < endIdx {
 		select {
@@ -1894,10 +1926,16 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 		io.ReadFull(br, instrBuf)
 		var regLen uint16
 		binary.Read(br, binary.LittleEndian, &regLen)
-		io.CopyN(io.Discard, br, int64(regLen))
+		if cap(regBuf) < int(regLen) {
+			regBuf = make([]byte, regLen, int(regLen)*2)
+		} else {
+			regBuf = regBuf[:regLen]
+		}
+		io.ReadFull(br, regBuf)
+		regText := string(regBuf)
 
-		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), "read", wLo, wHi, local)
-		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), "write", wLo, wHi, local)
+		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), regText, "read", wLo, wHi, local)
+		local = wpCheckChunks(br, job, idx, pcText, string(instrBuf), regText, "write", wLo, wHi, local)
 
 		idx++
 		job.scanned.Add(1)
@@ -1908,7 +1946,7 @@ func runWatchpointSegment(ctx context.Context, job *WatchpointJob, fileOffset in
 	return local
 }
 
-func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pcText string, instrText, chunkType string, wLo, wHi uint64, local []WatchpointMatch) []WatchpointMatch {
+func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pcText string, instrText, regText, chunkType string, wLo, wHi uint64, local []WatchpointMatch) []WatchpointMatch {
 	var cnt uint32
 	binary.Read(br, binary.LittleEndian, &cnt)
 	hdr := make([]byte, 12)
@@ -1952,9 +1990,15 @@ func wpCheckChunks(br *bufio.Reader, job *WatchpointJob, idx int, pcText string,
 				previewEnd = dataLen
 			}
 			preview := extractStringPreview(data[previewStart:previewEnd], 64)
+			// 提取实际访问范围的 hex
+			hexData := data[centerLoOff:centerHiOff]
+			hexText := hex.EncodeToString(hexData)
 			local = append(local, WatchpointMatch{
-				Index: idx, PC: pcText, InstrText: instrText,
-				ChunkBase: fmt.Sprintf("0x%x", base), ChunkType: chunkType,
+				Index: idx, PC: pcText, InstrText: instrText, RegText: regText,
+				HexText:     hexText,
+				AccessStart: fmt.Sprintf("0x%x", accessLo),
+				AccessEnd:   fmt.Sprintf("0x%x", accessHi),
+				ChunkType:   chunkType,
 				DataPreview: preview,
 			})
 		} else {

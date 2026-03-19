@@ -1622,10 +1622,10 @@ function PagedResults(opts) {
 PagedResults.prototype.getHaystack = function(m) {
   const t = this.filterType;
   if (t === 'instr') return (m.instrText || '').toLowerCase();
-  if (t === 'addr') return ((m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+  if (t === 'addr') return ((m.matchAddr || m.accessStart || '') + ' ' + (m.pc || '')).toLowerCase();
   if (t === 'string') return (m.dataPreview || '').toLowerCase();
   // all
-  return ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.chunkBase || '') + ' ' + (m.pc || '')).toLowerCase();
+  return ((m.instrText || '') + ' ' + (m.dataPreview || '') + ' ' + (m.matchAddr || m.accessStart || '') + ' ' + (m.pc || '')).toLowerCase();
 };
 
 PagedResults.prototype.applyFilter = function() {
@@ -1831,10 +1831,10 @@ const memSearchPR = new PagedResults({
     const tc = m.type === 'write' ? 'write' : 'read';
     const tl = m.type === 'write' ? 'W' : 'R';
     const strPreview = m.dataPreview ? '<span class="sr-str" title="' + escHtml(m.dataPreview) + '">"' + escHtml(m.dataPreview) + '"</span>' : '';
-    return '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.chunkBase + '" data-plen="' + m.patternLen + '">'
+    return '<div class="search-result-row" data-idx="' + m.index + '" data-addr="' + m.matchAddr + '" data-plen="' + m.patternLen + '">'
       + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
       + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
-      + '<span class="sr-addr">' + m.chunkBase + '</span>'
+      + '<span class="sr-addr">' + m.matchAddr + '</span>'
       + '<span class="sr-type ' + tc + '">[' + tl + ']</span>'
       + strPreview + '</div>';
   },
@@ -2008,7 +2008,7 @@ const wpPR = new PagedResults({
     return '<div class="search-result-row" data-idx="' + m.index + '">'
       + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
       + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
-      + '<span class="sr-addr">' + m.chunkBase + '</span>'
+      + '<span class="sr-addr">' + m.accessStart + '</span>'
       + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span>'
       + strPreview + '</div>';
   },
@@ -2163,7 +2163,7 @@ async function pollWpResults() {
         + '<span class="sr-idx" style="color:#6a9955">' + rank + '.</span>'
         + '<span class="sr-idx">#' + m.index + '</span><span class="sr-pc">' + m.pc + '</span>'
         + '<span class="sr-instr">' + escHtml(m.instrText) + '</span>'
-        + '<span class="sr-addr">' + m.chunkBase + '</span>'
+        + '<span class="sr-addr">' + m.accessStart + '</span>'
         + '<span class="sr-type ' + tc + '">[' + (m.type === 'write' ? 'W' : 'R') + ']</span>'
         + strPreview + '</div>';
     }

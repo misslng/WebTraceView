@@ -37,11 +37,10 @@ func setupMCP() http.Handler {
 	), handleGetInstructions)
 
 	s.AddTool(mcp.NewTool("get_memory",
-		mcp.WithDescription(`获取指定行号指令执行时的内存读写数据。每个 region 是实际访问地址前后各约 128 字节的上下文窗口，hex 编码。
-可传 highlight_addr + highlight_size 高亮关注的地址范围，返回值会额外提取该范围的 dataHex，便于直接读取而无需解析整个 hex dump。`),
+		mcp.WithDescription(`获取指定行号指令执行时的内存读写数据。返回实际访问地址前后各 32 字节的上下文窗口。
+hex 字段以 4 字节为单位分组，格式为 {"0x地址": "8位hex", ...}，方便逐字段阅读。
+accessRange 包含实际操作的地址范围及其原始 hex 数据。`),
 		mcp.WithNumber("index", mcp.Required(), mcp.Description("指令行号")),
-		mcp.WithString("highlight_addr", mcp.Description("关注的地址，hex 格式。搜索内存时可直接传入结果中的 chunkBase")),
-		mcp.WithNumber("highlight_size", mcp.Description("关注的字节数。搜索内存时可传入结果中的 patternLen")),
 	), handleGetMemory)
 
 	s.AddTool(mcp.NewTool("get_functions",
@@ -52,8 +51,8 @@ func setupMCP() http.Handler {
 
 	s.AddTool(mcp.NewTool("search_memory",
 		mcp.WithDescription(`在 trace 所有指令的内存读写数据中搜索 hex 字节序列或字符串，用于追踪特定数据（密钥、明文、魔数）出现在哪些指令中。
-搜索可能耗时较长（1.3亿条约40秒）。结果中 chunkBase 是匹配数据的精确内存地址，可直接传给 get_memory 的 highlight_addr（highlight_size 用 patternLen）。
-每条结果同时返回 dataPreview（可打印字符串预览）和 dataHex（匹配字节的原始 hex 编码）。`),
+搜索可能耗时较长（1.3亿条约40秒）。结果按 index 降序排列（最新的在前）。
+每条结果包含：matchAddr（匹配数据的精确内存地址）、regText（寄存器状态）、dataPreview（可打印字符串预览）、dataHex（匹配字节的原始 hex 编码）。`),
 		mcp.WithString("pattern", mcp.Required(), mcp.Description("搜索模式。hex 模式如 0a1b2c3d，string 模式如 hello")),
 		mcp.WithString("type", mcp.Required(), mcp.Description("hex 或 string")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),
@@ -61,12 +60,11 @@ func setupMCP() http.Handler {
 	), handleSearchMemory)
 
 	s.AddTool(mcp.NewTool("search_instructions",
-		mcp.WithDescription(`在 trace 所有指令中搜索关键词（大小写不敏感）。服务端将每条指令的 instrText + " " + pcText + " " + regText 用空格拼接为一个字符串并转小写，然后判断是否包含关键词。
-警告：请使用尽可能具体、完整的关键词！关键词必须是 "instrText pcText regText" 拼接结果中连续的子串才能命中。
-- 差: "mov x0" — 命中成千上万条
-- 好: "str x0, [x2] (0x4005bc0c)libmain.so" — 跨越 instrText 和 pcText
-- 好: "libmain.so+0x5bc04 sp=0xbffff680 => x0=" — 跨越 pcText 和 regText
-- 好: "=> x0=0x12345678" — 搜索特定寄存器写回值`),
+		mcp.WithDescription(`在 trace 所有指令中搜索关键词（大小写不敏感）。关键词按空格拆分为多个 token，每个 token 独立在 instrText、pcText、regText 三个字段中匹配，任一字段包含该 token 即算命中，所有 token 都命中才返回该条指令。结果按 index 降序排列（最新的在前）。
+示例：
+- "str x0 libmain.so" — str x0 匹配 instrText，libmain.so 匹配 pcText → 命中
+- "0x5bc04 => x0=" — 0x5bc04 匹配 pcText，=> x0= 匹配 regText → 命中
+- "mov x0" — 单个 token，在 instrText 中匹配 → 命中（但结果可能很多）`),
 		mcp.WithString("keyword", mcp.Required(), mcp.Description("搜索关键词，大小写不敏感")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),
 		mcp.WithNumber("limit", mcp.Description("结果分页大小，默认 50，最大 200")),
@@ -74,13 +72,13 @@ func setupMCP() http.Handler {
 
 	s.AddTool(mcp.NewTool("set_watchpoint",
 		mcp.WithDescription(`设置内存监控点，找出 trace 中所有访问指定地址范围的指令（读或写）。返回 watchpoint_id 用于后续 watchpoint_traceback 调用。
+结果按 index 降序排列（最新的在前）。每条结果包含：instrText、regText（寄存器状态）、hexText（实际访问数据的 hex）、accessStart/accessEnd（指令实际操作的内存地址范围）。
 重要：set_watchpoint 通常需要配合 watchpoint_traceback 使用来追踪数据来源链。
 典型数据溯源流程：
 1. search_memory 找到感兴趣的数据，发现某条 str x1, [addr] 写入了目标地址
 2. 想知道 x1 的值从哪来 → 向上看指令，找到 ldr x1, [0x123456]
 3. set_watchpoint 监控 0x123456 → 拿到 watchpoint_id → watchpoint_traceback 从 ldr 所在行号回溯，type_filter=write → 找到最后写入 0x123456 的指令
-4. 重复此过程，逐步追溯整条数据来源链
-提示：高亮时应使用本接口传入的 addr 和 size 作为 get_memory 的 highlight_addr/highlight_size（结果中的 chunkBase 是窗口起始地址，不是精确地址）。`),
+4. 重复此过程，逐步追溯整条数据来源链`),
 		mcp.WithString("addr", mcp.Required(), mcp.Description("监控地址，hex 格式如 0x40001000")),
 		mcp.WithNumber("size", mcp.Required(), mcp.Description("监控字节数（如 4 表示监控 4 字节）")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),
@@ -89,7 +87,7 @@ func setupMCP() http.Handler {
 
 	s.AddTool(mcp.NewTool("watchpoint_traceback",
 		mcp.WithDescription(`【必须先调用 set_watchpoint 拿到 watchpoint_id】从指定行号向上回溯，在监控点结果中找到该行之前最近的写入（或读取）记录。这是追踪数据来源链的核心工具。
-结果按行号降序（最邻近的在前），第一条就是离目标最近的访问。
+结果按行号降序（最邻近的在前），第一条就是离目标最近的访问。每条结果包含：instrText、regText（寄存器状态）、hexText（实际访问数据的 hex）、accessStart/accessEnd（指令实际操作的内存地址范围）。
 典型用法：发现 ldr x1, [0x123456] 从某地址读取了数据，想知道谁最后写入了 0x123456 → set_watchpoint(addr=0x123456, size=8) 拿到 watchpoint_id → watchpoint_traceback(watchpoint_id=id, before_index=ldr所在行号, type_filter=write) → 第一条结果就是最后写入该地址的 str 指令。`),
 		mcp.WithString("watchpoint_id", mcp.Required(), mcp.Description("set_watchpoint 返回的 watchpoint_id")),
 		mcp.WithNumber("before_index", mcp.Required(), mcp.Description("目标行号，只返回行号小于此值的记录")),
