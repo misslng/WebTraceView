@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
