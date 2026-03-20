@@ -51,7 +51,8 @@ public class RegAccessPrinter {
     private static final ConcurrentHashMap<Integer, PendingRecord> pendingRecords = new ConcurrentHashMap<>();
 
     private static volatile boolean inSvc;
-
+    // 支持svc mem
+    // 需要在backend 加 RegAccessPrinter.onMemWrite(address, bytes.length);
     public static void onMemWrite(long address, int size) {
         if (inSvc && globalWriter != null) {
             writeAccessPoints.offer(new AccessPoint(address, size));
