@@ -94,6 +94,8 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
 .results-pager button { background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 2px 8px; font-size: 11px; font-family: inherit; border-radius: 3px; cursor: pointer; }
 .results-pager button:hover { background: #505050; }
 .results-pager button:disabled { opacity: 0.4; cursor: default; }
+.results-pager input.pr-goto { width: 48px; background: #2d2d2d; border: 1px solid #555; color: #d4d4d4; padding: 2px 4px; font-size: 11px; font-family: inherit; border-radius: 3px; text-align: center; }
+.results-pager input.pr-goto:focus { border-color: #007acc; outline: none; }
 .result-section { border-bottom: 1px solid #404040; }
 .result-section-header { display: flex; align-items: center; gap: 6px; padding: 3px 8px; background: #2a2a3a; cursor: pointer; font-size: 11px; color: #569cd6; user-select: none; }
 .result-section-header:hover { background: #333350; }
@@ -1734,14 +1736,25 @@ PagedResults.prototype.renderAllFiltered = function() {
     this.pagerEl.innerHTML =
       '<button class="pr-prev">◀</button>' +
       '<span>' + (this.allFilterPage + 1) + ' / ' + totalPages + ' (' + filtered.length + ' 条)</span>' +
-      '<button class="pr-next">▶</button>';
+      '<button class="pr-next">▶</button>' +
+      '<input class="pr-goto" type="text" placeholder="跳页" title="输入页码后回车跳转">';
     const prev = this.pagerEl.querySelector('.pr-prev');
     const next = this.pagerEl.querySelector('.pr-next');
+    const gotoInput = this.pagerEl.querySelector('.pr-goto');
     prev.disabled = this.allFilterPage <= 0;
     next.disabled = this.allFilterPage >= totalPages - 1;
     const self = this;
     prev.onclick = () => { if (self.allFilterPage > 0) { self.allFilterPage--; self.renderAllFiltered(); } };
     next.onclick = () => { if (self.allFilterPage < totalPages - 1) { self.allFilterPage++; self.renderAllFiltered(); } };
+    gotoInput.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        const p = parseInt(gotoInput.value) - 1;
+        if (!isNaN(p) && p >= 0 && p < totalPages) {
+          self.allFilterPage = p;
+          self.renderAllFiltered();
+        }
+      }
+    };
   }
 };
 
@@ -1762,14 +1775,26 @@ PagedResults.prototype.renderPager = function() {
   this.pagerEl.innerHTML =
     '<button class="pr-prev">◀</button>' +
     '<span>' + (this.page + 1) + ' / ' + totalPages + ' (' + this.totalMatches + ' 条)</span>' +
-    '<button class="pr-next">▶</button>';
+    '<button class="pr-next">▶</button>' +
+    '<input class="pr-goto" type="text" placeholder="跳页" title="输入页码后回车跳转">';
   const prev = this.pagerEl.querySelector('.pr-prev');
   const next = this.pagerEl.querySelector('.pr-next');
+  const gotoInput = this.pagerEl.querySelector('.pr-goto');
   prev.disabled = this.page <= 0;
   next.disabled = this.page >= totalPages - 1;
   const self = this;
   prev.onclick = () => { if (self.page > 0) { self.page--; self.loadPage(self.page); self.renderPager(); } };
   next.onclick = () => { if (self.page < totalPages - 1) { self.page++; self.loadPage(self.page); self.renderPager(); } };
+  gotoInput.onkeydown = (e) => {
+    if (e.key === 'Enter') {
+      const p = parseInt(gotoInput.value) - 1;
+      if (!isNaN(p) && p >= 0 && p < totalPages) {
+        self.page = p;
+        self.loadPage(p);
+        self.renderPager();
+      }
+    }
+  };
 };
 
 PagedResults.prototype.loadPage = async function(page) {
@@ -2176,12 +2201,22 @@ async function pollWpResults() {
       pagerEl.innerHTML =
         '<button class="pr-prev">◀</button>' +
         '<span>' + (tracePage + 1) + ' / ' + totalPages + ' (' + traceResults.length + ' 条)</span>' +
-        '<button class="pr-next">▶</button>';
+        '<button class="pr-next">▶</button>' +
+        '<input class="pr-goto" type="text" placeholder="跳页" title="输入页码后回车跳转">';
       pagerEl.querySelector('.pr-prev').onclick = function() {
         if (tracePage > 0) { tracePage--; renderTracePage(); }
       };
       pagerEl.querySelector('.pr-next').onclick = function() {
         if (tracePage < totalPages - 1) { tracePage++; renderTracePage(); }
+      };
+      pagerEl.querySelector('.pr-goto').onkeydown = function(e) {
+        if (e.key === 'Enter') {
+          const p = parseInt(this.value) - 1;
+          if (!isNaN(p) && p >= 0 && p < totalPages) {
+            tracePage = p;
+            renderTracePage();
+          }
+        }
       };
     }
   }
