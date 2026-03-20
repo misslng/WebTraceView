@@ -50,6 +50,14 @@ public class RegAccessPrinter {
      */
     private static final ConcurrentHashMap<Integer, PendingRecord> pendingRecords = new ConcurrentHashMap<>();
 
+    private static volatile boolean inSvc;
+
+    public static void onMemWrite(long address, int size) {
+        if (inSvc && globalWriter != null) {
+            writeAccessPoints.offer(new AccessPoint(address, size));
+        }
+    }
+
     private final boolean isWritePass;
 
     public RegAccessPrinter(long address, Instruction instruction, short[] accessRegs, boolean forWriteRegs) {
@@ -207,10 +215,14 @@ public class RegAccessPrinter {
                         prev.readChunks, Collections.emptyList()));
             }
             List<MemoryChunk> readChunks = drainAccessPoints(readAccessPoints, backend);
+            if ("svc".equalsIgnoreCase(instruction.getMnemonic())) {
+                inSvc = true;
+            }
             pendingRecords.put(tid, new PendingRecord(tid, this.address, resolvePC(this.address), instrText,
                     regSnapshot, readChunks));
         } else {
             // ===== 第二次 print（写寄存器）=====
+            inSvc = false;
             PendingRecord pending = pendingRecords.remove(tid);
             if (pending != null) {
                 List<MemoryChunk> writeChunks = drainAccessPoints(writeAccessPoints, backend);
