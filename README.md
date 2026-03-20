@@ -68,6 +68,34 @@ MCP 端点地址为 `http://localhost:8080/mcp`，可在支持 MCP 的 AI 工具
 - 右侧面板包含内存搜索、Watchpoint、寄存器追踪、全局内存搜索等功能区
 - 底部可展开函数调用时间线
 
+## MCP 工具
+
+启动后 MCP 端点位于 `http://localhost:8080/mcp`，提供以下工具供 AI 调用：
+
+| 工具 | 说明 |
+|------|------|
+| `trace_info` | 获取 trace 基本信息（总记录数、线程列表、入口 PC 等） |
+| `get_instructions` | 分页获取指令列表，支持按线程过滤、按行号取上下文 |
+| `get_memory` | 获取指定行号指令的内存读写数据 |
+| `get_functions` | 获取识别出的函数列表（入口 PC、调用次数） |
+| `search_memory` | 在内存读写数据中搜索 hex 或字符串 |
+| `search_instructions` | 按关键词搜索指令（支持多 token 交集匹配） |
+| `set_watchpoint` | 设置内存监控点，找出所有访问指定地址的指令 |
+| `watchpoint_traceback` | 从指定行号向前回溯，找到最近一次访问监控地址的指令 |
+| `trace_register` | 追踪指定寄存器在指定范围内的值变化 |
+
+Cursor 中配置示例（`.cursor/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "unidbg-trace": {
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
 ## 二进制格式
 
 每条记录的格式（小端序）：
