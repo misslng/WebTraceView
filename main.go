@@ -1435,6 +1435,30 @@ func handleSearchInstr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// findIndex: 根据行号定位在结果中的位置
+	if fiStr := r.URL.Query().Get("findIndex"); fiStr != "" {
+		targetIdx, err := strconv.Atoi(fiStr)
+		if err != nil {
+			http.Error(w, "bad findIndex", 400)
+			return
+		}
+		job.mu.Lock()
+		pos := -1
+		for i, m := range job.matches {
+			if m.Index == targetIdx {
+				pos = i
+				break
+			}
+		}
+		job.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"found":    pos >= 0,
+			"position": pos,
+		})
+		return
+	}
+
 	off, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 200 {

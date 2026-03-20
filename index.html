@@ -221,6 +221,8 @@ body { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; background: 
     <div class="result-section" id="secInstrSearch" style="display:none">
       <div class="result-section-header" onclick="toggleSection('secInstrSearch')">
         <span class="rs-arrow">▼</span><span class="rs-label">🔎 指令搜索结果</span><span class="rs-badge" id="instrSearchBadge">0</span>
+        <input type="text" id="instrSearchGotoIdx" placeholder="跳转行号..." style="width:80px;margin-left:auto;font-size:11px;padding:1px 4px;background:#2d2d2d;border:1px solid #555;color:#d4d4d4;border-radius:3px" onclick="event.stopPropagation()" title="输入行号回车，跳到结果中该行所在页">
+        <span id="instrSearchGotoInfo" style="font-size:11px;color:#808080"></span>
       </div>
       <div class="result-section-body" id="instrSearchResults"></div>
     </div>
@@ -1375,6 +1377,29 @@ function initInstrSearch() {
   document.getElementById('btnInstrSearch').addEventListener('click', startInstrSearch);
   document.getElementById('instrSearchInput').addEventListener('keydown', e => { if (e.key === 'Enter') startInstrSearch(); });
   document.getElementById('btnInstrSearchStop').addEventListener('click', stopInstrSearch);
+  document.getElementById('instrSearchGotoIdx').addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter') return;
+    const idx = parseInt(e.target.value.trim());
+    const infoEl = document.getElementById('instrSearchGotoInfo');
+    if (isNaN(idx) || idx < 0) { infoEl.textContent = '无效行号'; return; }
+    infoEl.textContent = '查找中...';
+    try {
+      const data = await fetchJSON('/api/search/instr?findIndex=' + idx);
+      if (data.found) {
+        const page = Math.floor(data.position / instrSearchPR.pageSize);
+        instrSearchPR.page = page;
+        instrSearchPR.loadPage(page);
+        instrSearchPR.renderPager();
+        infoEl.textContent = '#' + idx + ' 在第 ' + (page + 1) + ' 页';
+        setTimeout(() => {
+          const row = instrSearchPR.listEl.querySelector('[data-idx="' + idx + '"]');
+          if (row) { row.style.background = '#3a3a00'; row.scrollIntoView({ block: 'center' }); setTimeout(() => row.style.background = '', 2000); }
+        }, 300);
+      } else {
+        infoEl.textContent = '#' + idx + ' 不在结果中';
+      }
+    } catch(err) { infoEl.textContent = '查询失败'; }
+  });
 }
 
 async function startInstrSearch() {
