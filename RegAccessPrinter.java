@@ -292,7 +292,13 @@ public class RegAccessPrinter {
                                           StringBuilder builder, boolean is32Bit) {
         try {
             if (isVectorReg(regId, is32Bit)) {
-                byte[] vec = backend.reg_read_vector(regId);
+                int vecId = regId;
+                if (!is32Bit && regId >= Arm64Const.UC_ARM64_REG_V0 && regId <= Arm64Const.UC_ARM64_REG_V31) {
+                    vecId = Arm64Const.UC_ARM64_REG_Q0 + (regId - Arm64Const.UC_ARM64_REG_V0);
+                } else if (is32Bit && regId >= ArmConst.UC_ARM_REG_Q0 && regId <= ArmConst.UC_ARM_REG_Q15) {
+                    vecId = ArmConst.UC_ARM_REG_D0 + 2 * (regId - ArmConst.UC_ARM_REG_Q0);
+                }
+                byte[] vec = backend.reg_read_vector(vecId);
                 StringBuilder hex = new StringBuilder();
                 for (int i = vec.length - 1; i >= 0; i--) {
                     hex.append(String.format("%02x", vec[i] & 0xFF));
