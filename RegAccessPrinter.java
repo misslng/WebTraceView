@@ -155,7 +155,7 @@ public class RegAccessPrinter {
                         long unsigned = value & 0xffffffffL;
                         builder.append(' ').append(instruction.regName(reg)).append("=0x").append(Long.toHexString(unsigned));
                     }
-                } else {
+                } else if (isSimdReg(regId, true)) {
                     if (forWriteRegs) {
                         builder.append(" =>");
                         forWriteRegs = false;
@@ -187,7 +187,7 @@ public class RegAccessPrinter {
                     int value = backend.reg_read(regId).intValue();
                     long unsigned = value & 0xffffffffL;
                     builder.append(' ').append(instruction.regName(reg)).append("=0x").append(Long.toHexString(unsigned));
-                } else {
+                } else if (isSimdReg(regId, false)) {
                     if (forWriteRegs) {
                         builder.append(" =>");
                         forWriteRegs = false;
@@ -287,63 +287,48 @@ public class RegAccessPrinter {
 
     private static final int WINDOW_RADIUS = 128;
 
-    /**
-     * 读取 SIMD/VFP 等非 GPR 寄存器值并追加到 builder。
-     * V/Q (128-bit) 优先走 reg_read_vector 拿完整 16 字节；
-     * D/S/H/B 等 <=64-bit 走 reg_read；
-     * 若都失败，ARM32 Q 降级读 D 寄存器对，ARM64 V/Q 降级读对应 D 寄存器。
-     */
+    /** V/Q 走 reg_read_vector (128-bit)，D/S/H/B 走 reg_read (<=64-bit) */
     private static void readAndAppendReg(Backend backend, Instruction instruction, short reg, int regId,
                                           StringBuilder builder, boolean is32Bit) {
-        if (isVectorReg(regId, is32Bit)) {
-            try {
-                byte[] vec = backend.reg_read_vector(regId);
-                if (vec != null && vec.length > 0) {
-                    StringBuilder hex = new StringBuilder();
-                    for (int i = vec.length - 1; i >= 0; i--) {
-                        hex.append(String.format("%02x", vec[i] & 0xFF));
-                    }
-                    String hexStr = hex.toString().replaceFirst("^0+(?!$)", "");
-                    builder.append(' ').append(instruction.regName(reg)).append("=0x").append(hexStr);
-                    return;
-                }
-            } catch (Exception ignored) {}
-        }
         try {
-            long value = backend.reg_read(regId).longValue();
-            builder.append(' ').append(instruction.regName(reg)).append("=0x")
-                   .append(Long.toHexString(value));
-        } catch (Exception e) {
-            try {
-                if (is32Bit && regId >= ArmConst.UC_ARM_REG_Q0 && regId <= ArmConst.UC_ARM_REG_Q15) {
-                    int qIdx = regId - ArmConst.UC_ARM_REG_Q0;
-                    long lo = backend.reg_read(ArmConst.UC_ARM_REG_D0 + 2 * qIdx).longValue();
-                    long hi = backend.reg_read(ArmConst.UC_ARM_REG_D0 + 2 * qIdx + 1).longValue();
-                    builder.append(' ').append(instruction.regName(reg)).append("=0x")
-                           .append(Long.toHexString(hi)).append(String.format("%016x", lo));
-                } else if (!is32Bit) {
-                    int dIdx = -1;
-                    if (regId >= Arm64Const.UC_ARM64_REG_V0 && regId <= Arm64Const.UC_ARM64_REG_V31) {
-                        dIdx = regId - Arm64Const.UC_ARM64_REG_V0;
-                    } else if (regId >= Arm64Const.UC_ARM64_REG_Q0 && regId <= Arm64Const.UC_ARM64_REG_Q31) {
-                        dIdx = regId - Arm64Const.UC_ARM64_REG_Q0;
-                    }
-                    if (dIdx >= 0) {
-                        long lo = backend.reg_read(Arm64Const.UC_ARM64_REG_D0 + dIdx).longValue();
-                        builder.append(' ').append(instruction.regName(reg)).append("=0x")
-                               .append(Long.toHexString(lo));
-                    }
+            if (isVectorReg(regId, is32Bit)) {
+                byte[] vec = backend.reg_read_vector(regId);
+                StringBuilder hex = new StringBuilder();
+                for (int i = vec.length - 1; i >= 0; i--) {
+                    hex.append(String.format("%02x", vec[i] & 0xFF));
                 }
-            } catch (Exception ignored) {}
-        }
+                builder.append(' ').append(instruction.regName(reg)).append("=0x")
+                       .append(hex.toString().replaceFirst("^0+(?!$)", ""));
+            } else {
+                long value = backend.reg_read(regId).longValue();
+                builder.append(' ').append(instruction.regName(reg)).append("=0x")
+                       .append(Long.toHexString(value));
+            }
+        } catch (Exception ignored) {}
     }
 
+    /** V/Q 128-bit 寄存器，用于判断是否走 reg_read_vector */
     private static boolean isVectorReg(int regId, boolean is32Bit) {
         if (is32Bit) {
             return regId >= ArmConst.UC_ARM_REG_Q0 && regId <= ArmConst.UC_ARM_REG_Q15;
         }
         return (regId >= Arm64Const.UC_ARM64_REG_V0 && regId <= Arm64Const.UC_ARM64_REG_V31) ||
                (regId >= Arm64Const.UC_ARM64_REG_Q0 && regId <= Arm64Const.UC_ARM64_REG_Q31);
+    }
+
+    /** 所有 SIMD/VFP 寄存器（V/Q/D/S/H/B） */
+    private static boolean isSimdReg(int regId, boolean is32Bit) {
+        if (is32Bit) {
+            return (regId >= ArmConst.UC_ARM_REG_D0 && regId <= ArmConst.UC_ARM_REG_D31) ||
+                   (regId >= ArmConst.UC_ARM_REG_Q0 && regId <= ArmConst.UC_ARM_REG_Q15) ||
+                   (regId >= ArmConst.UC_ARM_REG_S0 && regId <= ArmConst.UC_ARM_REG_S31);
+        }
+        return (regId >= Arm64Const.UC_ARM64_REG_V0 && regId <= Arm64Const.UC_ARM64_REG_V31) ||
+               (regId >= Arm64Const.UC_ARM64_REG_Q0 && regId <= Arm64Const.UC_ARM64_REG_Q31) ||
+               (regId >= Arm64Const.UC_ARM64_REG_D0 && regId <= Arm64Const.UC_ARM64_REG_D31) ||
+               (regId >= Arm64Const.UC_ARM64_REG_S0 && regId <= Arm64Const.UC_ARM64_REG_S31) ||
+               (regId >= Arm64Const.UC_ARM64_REG_H0 && regId <= Arm64Const.UC_ARM64_REG_H31) ||
+               (regId >= Arm64Const.UC_ARM64_REG_B0 && regId <= Arm64Const.UC_ARM64_REG_B31);
     }
 
     // ==================== PC 符号化 ====================
