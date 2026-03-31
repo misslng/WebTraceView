@@ -61,11 +61,13 @@ accessRange 包含实际操作的地址范围及其原始 hex 数据。`),
 
 	s.AddTool(mcp.NewTool("search_instructions",
 		mcp.WithDescription(`在 trace 所有指令中搜索关键词（大小写不敏感）。关键词按空格拆分为多个 token，每个 token 独立在 instrText、pcText、regText 三个字段中匹配，任一字段包含该 token 即算命中，所有 token 都命中才返回该条指令。结果按 index 降序排列（最新的在前）。
+支持行号跳转：传入 line 参数时，自动定位到包含该行号的结果页并返回，同时返回该行在结果中的位置 foundPosition。
 示例：
 - "str x0 libmain.so" — str x0 匹配 instrText，libmain.so 匹配 pcText → 命中
 - "0x5bc04 => x0=" — 0x5bc04 匹配 pcText，=> x0= 匹配 regText → 命中
 - "mov x0" — 单个 token，在 instrText 中匹配 → 命中（但结果可能很多）`),
 		mcp.WithString("keyword", mcp.Required(), mcp.Description("搜索关键词，大小写不敏感")),
+		mcp.WithNumber("line", mcp.Description("行号跳转：传入指令行号（index），自动定位到该行所在的结果页返回。与 offset 互斥，优先使用 line")),
 		mcp.WithNumber("offset", mcp.Description("结果分页偏移，默认 0")),
 		mcp.WithNumber("limit", mcp.Description("结果分页大小，默认 50，最大 200")),
 	), handleSearchInstructions)

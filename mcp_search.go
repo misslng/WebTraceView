@@ -117,7 +117,13 @@ func handleSearchInstructions(ctx context.Context, req mcp.CallToolRequest) (*mc
 		limit = 50
 	}
 
-	// Independent job — does NOT touch global instrSearch
+	lineJump := -1
+	if args := req.GetArguments(); args != nil {
+		if _, ok := args["line"]; ok {
+			lineJump = req.GetInt("line", -1)
+		}
+	}
+
 	searchCtx, cancel := context.WithCancel(context.Background())
 	kwLower := strings.ToLower(keyword)
 	job := &InstrSearchJob{
@@ -136,6 +142,20 @@ func handleSearchInstructions(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	job.mu.Lock()
 	total := len(job.matches)
+
+	foundPosition := -1
+	if lineJump >= 0 {
+		for i, m := range job.matches {
+			if m.Index == lineJump {
+				foundPosition = i
+				break
+			}
+		}
+		if foundPosition >= 0 {
+			off = (foundPosition / limit) * limit
+		}
+	}
+
 	end := off + limit
 	if end > total {
 		end = total
@@ -150,11 +170,17 @@ func handleSearchInstructions(ctx context.Context, req mcp.CallToolRequest) (*mc
 		slice = []InstrSearchMatch{}
 	}
 
-	return mcpJSON(map[string]interface{}{
+	result := map[string]interface{}{
 		"done": true, "scanned": job.scanned.Load(),
 		"totalMatches": total, "totalRecords": db.totalRecs.Load(),
-		"matches": slice,
-	})
+		"offset": off, "matches": slice,
+	}
+	if lineJump >= 0 {
+		result["foundPosition"] = foundPosition
+		result["lineFound"] = foundPosition >= 0
+	}
+
+	return mcpJSON(result)
 }
 
 // ==================== Tool: set_watchpoint ====================
